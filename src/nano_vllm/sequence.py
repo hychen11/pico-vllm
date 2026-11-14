@@ -45,6 +45,21 @@ class Sequence:
         # store physical kv block id, like seq.block_table = [12,7,19]
         self.block_table: list[int] = []
 
+    def __len__(self) -> int:
+        return self.num_tokens
+
+    @property
+    def num_blocks(self) -> int:
+        return (self.num_tokens + self.block_size - 1) // self.block_size
+
+    @property
+    def last_block_num_tokens(self) -> int:
+        return self.num_tokens - (self.num_blocks - 1) * self.block_size
+
+    def block(self, i: int) -> list[int]:
+        assert 0 <= i < self.num_blocks
+        return self.token_ids[i * self.block_size : (i + 1) * self.block_size]
+
     def append_token(self, token_id: int) -> None:
         """Append a token to the sequence."""
         self.token_ids.append(token_id)
