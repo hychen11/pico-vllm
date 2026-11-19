@@ -119,6 +119,61 @@ WAITING → RUNNING → FINISHED_STOPPED
                   └→ FINISHED_ABORTED
 ```
 
+## How the components fit together
+
+Two independent halves meet only through `Sequence.block_table`, a plain list of block ids:
+
+- the **bookkeeping half** (CPU, Python objects) decides *which* block ids a sequence owns;
+- the **storage half** (CPU or GPU tensors) holds the actual K/V values at those ids.
+
+`BlockManager` never touches a tensor, and `PagedKVCache` never decides who owns a block. In particular, `BlockManager` does **not** call `PagedKVCache`.
+
+```text
+                      LLMEngine (M5)  — calls both halves once per step
+                     /                \
+   bookkeeping (CPU)                    storage + compute (device)
+   ─────────────────                    ──────────────────────────
+   Scheduler (M2)                       ModelRunner (M4)
+     │ owns                               │ owns            │ owns
+     ▼                                    ▼                 ▼
+   BlockManager (M2)                    Qwen3ForCausalLM   PagedKVCache (M4)
+     · free queue, ref_count, hash        (M3)               k_cache / v_cache
+     · writes block ids into ─┐           │ each layer      [L, N, B, H, D]
+                              │           ▼                    ▲
+                              ▼         Attention (M4) ────────┘
+                     Sequence.block_table   reads Context:     write()/read()
+                     e.g. [3, 8]            slot_mapping,
+                              │             block_tables, ...
+                              │                ▲
+                              └──► ModelRunner.prepare_inputs builds Context
+                                   (set_context / get_context, utils/context.py)
+```
+
+Who calls whom:
+
+| Caller | Callee | Why |
+| --- | --- | --- |
+| `LLMEngine.step` | `Scheduler.schedule` | pick the seqs for this step; blocks are reserved here |
+| `Scheduler` | `BlockManager.can_allocate / allocate / may_append / deallocate / hash_blocks` | manage block ids, write `seq.block_table` |
+| `LLMEngine.step` | `ModelRunner.run(seqs, is_prefill)` | run the model on the scheduled batch |
+| `ModelRunner.prepare_inputs` | reads `seq.block_table`, `num_cached_tokens`, ... | turn block ids into `slot_mapping` and a `Context` |
+| `ModelRunner.run` | `set_context` → `model(...)` → `reset_context` | expose the step's metadata to every layer |
+| `Attention.forward` | `get_context().kv_cache.write / read` | store this step's K/V and read the full context |
+| `LLMEngine.step` | `Scheduler.postprocess` | append sampled tokens, hash full blocks, finish/free seqs |
+
+One step, end to end:
+
+```text
+1. Scheduler.schedule()        BlockManager gives seq A blocks [3, 8]   (ids only)
+2. ModelRunner.prepare_inputs  pos 0..4 of A → slots 12,13,14,15,32     (ids → slots)
+3. Attention, every layer      kv_cache.write(slots, k, v)              (values land in k_cache)
+                               kv_cache.read(block_table=[3, 8], len=5)
+4. Scheduler.postprocess       append token; finished? → deallocate     (ids return to free queue;
+                                                                          k_cache is left untouched)
+```
+
+`PagedKVCache` is allocated once at startup with `num_blocks` equal to the `BlockManager`'s `num_blocks`; the two must agree, since block id `i` in one is index `i` in the other.
+
 ## Paged KV cache
 
 For `block_size = 4`, ten tokens occupy three logical blocks:

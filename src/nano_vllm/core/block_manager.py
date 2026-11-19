@@ -181,3 +181,16 @@ class BlockManager:
 prefill check:can_allocate op:allocate
 decode  check:can_append  op:may_append
 """
+
+# Block lifecycle:
+#
+#   free, no hash --allocate/may_append--> used, no hash --hash_blocks--> used, hashed
+#        ^                                                                  |    ^
+#        | _allocate_block: drop index                       deallocate     |    | prefix hit:
+#        | entry, reset, reuse                               (ref_count->0) |    | remove from free
+#        |                                                                  v    | queue, ref_cnt=1
+#        +---------------------------------------------------------- free, hashed
+#                                                       KV kept, still hittable
+#
+# Freeing only moves the block to the free queue; its hash and KV stay intact
+# until _allocate_block pops it for reuse (LRU from the queue head).

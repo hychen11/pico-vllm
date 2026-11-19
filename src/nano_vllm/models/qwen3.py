@@ -15,23 +15,24 @@ from torch import nn
 
 from nano_vllm.config import get_rope_theta
 from nano_vllm.layers.activation import SiluAndMul
+from nano_vllm.layers.attention import Attention
 from nano_vllm.layers.layernorm import RMSNorm
 from nano_vllm.layers.linear import MergedLinear, QKVLinear
 from nano_vllm.layers.rotary_embedding import RotaryEmbedding
 
 
 class Qwen3Attention(nn.Module):
-    def __init__(self, config: Any) -> None:
+    def __init__(self, config: Any, layer_idx: int) -> None:
         super().__init__()
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
         assert self.num_heads % self.num_kv_heads == 0
         self.head_dim = getattr(config, "head_dim", None) or (
-            config.hidden_size // self.num_heads
+                config.hidden_size // self.num_heads
         )
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim**-0.5
+        self.scaling = self.head_dim ** -0.5
         bias = getattr(config, "attention_bias", False)
 
         self.qkv_proj = QKVLinear(
@@ -43,6 +44,9 @@ class Qwen3Attention(nn.Module):
         self.rotary_emb = RotaryEmbedding(
             self.head_dim, config.max_position_embeddings, get_rope_theta(config)
         )
+        self.attn = Attention(
+            self.num_heads, self.num_kv_heads, self.head_dim, self.scaling, layer_idx
+        )
 
     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:
         n = hidden_states.shape[0]
@@ -53,7 +57,7 @@ class Qwen3Attention(nn.Module):
         k = self.k_norm(k.view(n, self.num_kv_heads, self.head_dim))
         v = v.view(n, self.num_kv_heads, self.head_dim)
         q, k = self.rotary_emb(positions, q, k)
-        o = self._attention(q, k, v)  # [N, num_heads, head_dim]
+        o = self.attn(q, k, v)  # [N, num_heads, head_dim]
         return self.o_proj(o.reshape(n, self.q_size))
 
     def _attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
@@ -80,9 +84,9 @@ class Qwen3MLP(nn.Module):
 
 
 class Qwen3DecoderLayer(nn.Module):
-    def __init__(self, config: Any) -> None:
+    def __init__(self, config: Any, layer_idx: int) -> None:
         super().__init__()
-        self.self_attn = Qwen3Attention(config)
+        self.self_attn = Qwen3Attention(config, layer_idx)
         self.mlp = Qwen3MLP(config)
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -99,7 +103,7 @@ class Qwen3Model(nn.Module):
         super().__init__()
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList(
-            [Qwen3DecoderLayer(config) for _ in range(config.num_hidden_layers)]
+            [Qwen3DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
