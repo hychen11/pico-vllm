@@ -69,3 +69,13 @@ class Sequence:
     @property
     def is_finished(self) -> bool:
         return self.status == SequenceStatus.FINISHED
+
+    @property
+    def num_completion_tokens(self) -> int:
+        """Tokens generated so far (everything after the original prompt). (M5)"""
+        return self.num_tokens - self.num_prompt_tokens
+
+    @property
+    def completion_token_ids(self) -> list[int]:
+        """The generated tokens, without the prompt. (M5)"""
+        return self.token_ids[self.num_prompt_tokens:]

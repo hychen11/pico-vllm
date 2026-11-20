@@ -11,15 +11,17 @@ from dataclasses import dataclass
 class SamplingParams:
     """Options supplied when creating a text-generation request."""
 
+    # 0 means greedy (always the highest-probability token, deterministic);
+    # > 0 samples from softmax(logits / temperature).
     temperature: float = 1.0
+    # Maximum number of *generated* tokens; the prompt does not count.
     max_tokens: int = 128
+    # Keep generating past EOS until max_tokens (useful for benchmarks).
     ignore_eos: bool = False
 
     def __post_init__(self):
         """Validate field values after the dataclass initializer assigns them."""
-        # Greedy sampling always picks the highest-probability next token, so
-        # its output is deterministic. It is conventionally temperature=0.
-        # This initial implementation requires a positive temperature instead.
-        assert self.temperature > 1e-10, "greedy sampling is not permitted"
+        if self.temperature < 0:
+            raise ValueError("temperature must be non-negative")
         if self.max_tokens <= 0:
             raise ValueError("max_tokens must be positive")

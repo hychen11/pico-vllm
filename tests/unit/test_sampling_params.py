@@ -10,9 +10,14 @@ def test_defaults_and_explicit_values() -> None:
     assert SamplingParams(temperature=0.7, max_tokens=1, ignore_eos=True).ignore_eos is True
 
 
-@pytest.mark.parametrize("temperature", [0.0, -0.1, 1e-11])
-def test_greedy_or_negative_temperature_is_rejected(temperature: float) -> None:
-    with pytest.raises((AssertionError, ValueError), match="greedy sampling is not permitted"):
+@pytest.mark.parametrize("temperature", [0.0, 1e-11])
+def test_greedy_and_tiny_temperature_are_allowed(temperature: float) -> None:
+    assert SamplingParams(temperature=temperature).temperature == temperature
+
+
+@pytest.mark.parametrize("temperature", [-0.1, -1.0])
+def test_negative_temperature_is_rejected(temperature: float) -> None:
+    with pytest.raises(ValueError, match="temperature"):
         SamplingParams(temperature=temperature)
 
 

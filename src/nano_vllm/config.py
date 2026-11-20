@@ -16,6 +16,9 @@ class Config:
     max_num_seqs: int = 512
     max_model_len: int = 4096
     kvcache_block_size: int = 256
+    # Bytes for the whole paged KV cache (K and V, all layers); sizes num_blocks.
+    # Fixed until M6, which sizes the cache from free GPU memory instead.
+    kvcache_capacity_bytes: int = 2 * 2**30
     hf_config: Any = field(default=None, init=False)
 
     def __post_init__(self) -> None:
