@@ -5,7 +5,7 @@ import math
 import pytest
 import torch
 
-from nano_vllm.layers.rotary_embedding import RotaryEmbedding
+from pico_vllm.layers.rotary_embedding import RotaryEmbedding
 
 
 def test_position_zero_is_identity() -> None:

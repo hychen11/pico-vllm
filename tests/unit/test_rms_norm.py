@@ -6,8 +6,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from nano_vllm.layers.activation import SiluAndMul
-from nano_vllm.layers.layernorm import RMSNorm
+from pico_vllm.layers.activation import SiluAndMul
+from pico_vllm.layers.layernorm import RMSNorm
 
 
 def test_rms_norm_hand_computed_values() -> None:

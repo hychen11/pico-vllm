@@ -12,8 +12,8 @@ hits from pass 1):
 2. ``max_tokens=output_len``: prefill + decode -> decode tok/s is
    ``num_seqs * (output_len - 1) / (t_full - t_prefill)``.
 
-    uv run python -m nano_vllm.benchmark            # defaults below, cuda + bf16
-    uv run python -m nano_vllm.benchmark --num-seqs 64 --max-output-len 256
+    uv run python -m pico_vllm.benchmark            # defaults below, cuda + bf16
+    uv run python -m pico_vllm.benchmark --num-seqs 64 --max-output-len 256
 """
 
 from __future__ import annotations
@@ -26,14 +26,14 @@ from typing import Any
 
 import torch
 
-from nano_vllm.core.paged_kv_cache import PagedKVCache, num_blocks_from_capacity
-from nano_vllm.core.scheduler import Scheduler
-from nano_vllm.engine.llm_engine import LLMEngine
-from nano_vllm.models.qwen3 import Qwen3ForCausalLM
-from nano_vllm.sampling_params import SamplingParams
-from nano_vllm.sequence import Sequence
-from nano_vllm.utils.loader import init_on
-from nano_vllm.worker.model_runner import ModelRunner
+from pico_vllm.core.paged_kv_cache import PagedKVCache, num_blocks_from_capacity
+from pico_vllm.core.scheduler import Scheduler
+from pico_vllm.engine.llm_engine import LLMEngine
+from pico_vllm.models.qwen3 import Qwen3ForCausalLM
+from pico_vllm.sampling_params import SamplingParams
+from pico_vllm.sequence import Sequence
+from pico_vllm.utils.loader import init_on
+from pico_vllm.worker.model_runner import ModelRunner
 
 
 def qwen3_0_6b_config(**overrides: Any) -> Any:

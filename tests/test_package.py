@@ -1,6 +1,6 @@
 """Tests for the installed package boundary."""
 
-from nano_vllm import __version__
+from pico_vllm import __version__
 
 
 def test_package_exposes_version() -> None:

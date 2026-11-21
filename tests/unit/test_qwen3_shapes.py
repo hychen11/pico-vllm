@@ -5,9 +5,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from nano_vllm.config import Config, get_rope_theta
-from nano_vllm.models.qwen3 import Qwen3ForCausalLM
-from nano_vllm.utils.loader import load_weights
+from pico_vllm.config import Config, get_rope_theta
+from pico_vllm.models.qwen3 import Qwen3ForCausalLM
+from pico_vllm.utils.loader import load_weights
 
 transformers = pytest.importorskip("transformers")
 

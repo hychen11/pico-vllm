@@ -21,11 +21,11 @@ M6（CUDA fast path）只做性能优化，不改变 M5 的输出语义。本文
 ## 测量方法
 
 ```bash
-uv run python -m nano_vllm.benchmark --device cuda:0 --dtype <float32|bfloat16> [--no-triton]
-uv run python -m nano_vllm.benchmark --device cpu --dtype float32      # 第 0 行
+uv run python -m pico_vllm.benchmark --device cuda:0 --dtype <float32|bfloat16> [--no-triton]
+uv run python -m pico_vllm.benchmark --device cpu --dtype float32      # 第 0 行
 ```
 
-- 负载：`nano_vllm.benchmark` 默认参数。32 条请求，prompt 长度 128–512 token（共 10705 个，固定随机种子），每条输出 128 个 token（`ignore_eos`）。模型是随机初始化、Qwen3-0.6B 形状的模型，因为吞吐只取决于形状。
+- 负载：`pico_vllm.benchmark` 默认参数。32 条请求，prompt 长度 128–512 token（共 10705 个，固定随机种子），每条输出 128 个 token（`ignore_eos`）。模型是随机初始化、Qwen3-0.6B 形状的模型，因为吞吐只取决于形状。
 - 指标：prefill tok/s = prompt token 数 / 只做 prefill 的耗时；decode tok/s = 32 × 127 / （全程耗时 − prefill 耗时）。
 - GPU 行每个配置跑 2 遍，表中是平均值；CPU 基线耗时约 2 分钟，只跑了 1 遍。
 - 第 0 行用的是当前代码的 `--device cpu` 路径。CPU 上不启用 Triton，attention 也是 eager，计算路径和 M5 一致。

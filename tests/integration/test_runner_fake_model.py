@@ -10,14 +10,14 @@ from __future__ import annotations
 import pytest
 import torch
 
-from nano_vllm.core.paged_kv_cache import PagedKVCache
-from nano_vllm.core.scheduler import Scheduler
-from nano_vllm.sequence import Sequence
-from nano_vllm.utils.context import get_context
-from nano_vllm.worker.model_runner import ModelRunner
+from pico_vllm.core.paged_kv_cache import PagedKVCache
+from pico_vllm.core.scheduler import Scheduler
+from pico_vllm.sequence import Sequence
+from pico_vllm.utils.context import get_context
+from pico_vllm.worker.model_runner import ModelRunner
 
 transformers = pytest.importorskip("transformers")
-from nano_vllm.models.qwen3 import Qwen3ForCausalLM  # noqa: E402
+from pico_vllm.models.qwen3 import Qwen3ForCausalLM  # noqa: E402
 
 pytestmark = pytest.mark.integration
 

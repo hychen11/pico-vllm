@@ -2,8 +2,8 @@
 
 import pytest
 
-from nano_vllm.core.block_manager import BlockManager
-from nano_vllm.sequence import Sequence
+from pico_vllm.core.block_manager import BlockManager
+from pico_vllm.sequence import Sequence
 
 BS = 4  # small block size so tests stay readable
 

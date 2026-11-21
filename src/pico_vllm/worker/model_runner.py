@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import torch
 
-from nano_vllm.core.paged_kv_cache import PagedKVCache
-from nano_vllm.models.qwen3 import Qwen3ForCausalLM
-from nano_vllm.sequence import Sequence
-from nano_vllm.utils.context import Context, reset_context, set_context
+from pico_vllm.core.paged_kv_cache import PagedKVCache
+from pico_vllm.models.qwen3 import Qwen3ForCausalLM
+from pico_vllm.sequence import Sequence
+from pico_vllm.utils.context import Context, reset_context, set_context
 
 
 def slot_mapping_for(block_table: list[int], block_size: int, start: int, end: int) -> list[int]:

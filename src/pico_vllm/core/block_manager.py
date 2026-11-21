@@ -24,7 +24,7 @@ from collections import deque
 import numpy as np
 import xxhash
 
-from nano_vllm.sequence import Sequence
+from pico_vllm.sequence import Sequence
 
 
 class Block:

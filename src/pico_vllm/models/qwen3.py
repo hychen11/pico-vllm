@@ -13,12 +13,12 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from nano_vllm.config import get_rope_theta
-from nano_vllm.layers.activation import SiluAndMul
-from nano_vllm.layers.attention import Attention
-from nano_vllm.layers.layernorm import RMSNorm
-from nano_vllm.layers.linear import MergedLinear, QKVLinear
-from nano_vllm.layers.rotary_embedding import RotaryEmbedding
+from pico_vllm.config import get_rope_theta
+from pico_vllm.layers.activation import SiluAndMul
+from pico_vllm.layers.attention import Attention
+from pico_vllm.layers.layernorm import RMSNorm
+from pico_vllm.layers.linear import MergedLinear, QKVLinear
+from pico_vllm.layers.rotary_embedding import RotaryEmbedding
 
 
 class Qwen3Attention(nn.Module):

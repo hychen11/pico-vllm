@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import torch
 
-from nano_vllm.kernels import kv_store
+from pico_vllm.kernels import kv_store
 
 
 class PagedKVCache:

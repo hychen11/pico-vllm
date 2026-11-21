@@ -5,10 +5,10 @@ from __future__ import annotations
 import pytest
 import torch
 
-from nano_vllm.config import Config, resolve_dtype
-from nano_vllm.engine.llm_engine import build_model
-from nano_vllm.models.qwen3 import Qwen3ForCausalLM
-from nano_vllm.utils.loader import init_on
+from pico_vllm.config import Config, resolve_dtype
+from pico_vllm.engine.llm_engine import build_model
+from pico_vllm.models.qwen3 import Qwen3ForCausalLM
+from pico_vllm.utils.loader import init_on
 
 transformers = pytest.importorskip("transformers")
 

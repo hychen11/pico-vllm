@@ -2,8 +2,8 @@
 
 import pytest
 
-from nano_vllm.core.scheduler import Scheduler
-from nano_vllm.sequence import Sequence, SequenceStatus
+from pico_vllm.core.scheduler import Scheduler
+from pico_vllm.sequence import Sequence, SequenceStatus
 
 BS = 4  # small block size so tests stay readable
 TOKEN = 7  # fake sampled token returned by the "model"

@@ -62,7 +62,7 @@ Triton 的 GPU 耗时只有 eager 的约 1/4。但 batch 较小时，两边 CPU 
 import time
 import torch
 from torch.profiler import ProfilerActivity, profile
-from nano_vllm.core.paged_kv_cache import PagedKVCache
+from pico_vllm.core.paged_kv_cache import PagedKVCache
 
 dev, dt = "cuda:0", torch.bfloat16
 NB, B, KH, D = 80, 256, 8, 128
@@ -103,7 +103,7 @@ for T in (16384, 2048, 256, 32, 1):
 
 开关 Triton 对吞吐没有可测量的影响。而且 5090 的 decode 和 4060 一样快，说明 decode 的瓶颈在 CPU。
 
-负载：`nano_vllm.benchmark` 默认参数，32 条请求，prompt 长度 128–512 token（共 10705 个），每条输出 128 个 token（`ignore_eos`），bf16。每个配置跑 2 遍，表中两遍结果用 / 分隔。
+负载：`pico_vllm.benchmark` 默认参数，32 条请求，prompt 长度 128–512 token（共 10705 个），每条输出 128 个 token（`ignore_eos`），bf16。每个配置跑 2 遍，表中两遍结果用 / 分隔。
 
 | GPU | Triton | prefill（tok/s） | decode（tok/s） |
 | --- | --- | --- | --- |
@@ -130,7 +130,7 @@ Triton Error [CUDA]: no kernel image is available for execution on the device
 
 原因是 Triton 按当前默认 GPU（`cuda:0`，即 5090，sm_120）编译和启动 kernel，而数据在 `cuda:1`（4060，sm_89）上。修法是在 `kernels/kv_store.py` 启动 kernel 时包一层 `with torch.cuda.device(k.device):`，并补一个在非默认卡上运行的测试。本报告中 4060 的数据是用 `CUDA_VISIBLE_DEVICES=1` 绕过这个问题得到的，代码没有修改。
 
-**正确性**：设置 `NANO_VLLM_QWEN_MODEL` 后，完整测试 184 个全部通过，包括真实权重测试和 Triton 与 eager 的对比测试。
+**正确性**：设置 `PICO_VLLM_QWEN_MODEL` 后，完整测试 184 个全部通过，包括真实权重测试和 Triton 与 eager 的对比测试。
 
 ## 复现步骤
 
@@ -138,15 +138,15 @@ Triton Error [CUDA]: no kernel image is available for execution on the device
 
 ```bash
 # 端到端：5090，Triton 开 / 关
-uv run python -m nano_vllm.benchmark --device cuda:0
-uv run python -m nano_vllm.benchmark --device cuda:0 --no-triton
+uv run python -m pico_vllm.benchmark --device cuda:0
+uv run python -m pico_vllm.benchmark --device cuda:0 --no-triton
 
 # 端到端：4060（bug 修复前，必须只让程序看到这张卡）
-CUDA_VISIBLE_DEVICES=1 uv run python -m nano_vllm.benchmark --device cuda --kv-cache-gib 2
-CUDA_VISIBLE_DEVICES=1 uv run python -m nano_vllm.benchmark --device cuda --kv-cache-gib 2 --no-triton
+CUDA_VISIBLE_DEVICES=1 uv run python -m pico_vllm.benchmark --device cuda --kv-cache-gib 2
+CUDA_VISIBLE_DEVICES=1 uv run python -m pico_vllm.benchmark --device cuda --kv-cache-gib 2 --no-triton
 
 # 正确性：全部测试，包括真实权重
-NANO_VLLM_QWEN_MODEL=$HOME/models/Qwen3-0.6B uv run pytest -q
+PICO_VLLM_QWEN_MODEL=$HOME/models/Qwen3-0.6B uv run pytest -q
 ```
 
 注意：flash-attn 还没有写进 `pyproject.toml`，运行 `uv sync` 会把它卸载。卸载后可以用 `uv pip install --no-deps ~/wheels/flash_attn-2.8.4-cp314-cp314-linux_x86_64.whl` 重新安装。

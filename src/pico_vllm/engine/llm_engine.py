@@ -15,15 +15,15 @@ from typing import Any
 
 import torch
 
-from nano_vllm.config import Config
-from nano_vllm.core.paged_kv_cache import PagedKVCache, num_blocks_from_capacity
-from nano_vllm.core.scheduler import Scheduler
-from nano_vllm.models.qwen3 import Qwen3ForCausalLM
-from nano_vllm.sampler import sample
-from nano_vllm.sampling_params import SamplingParams
-from nano_vllm.sequence import Sequence
-from nano_vllm.utils.loader import init_on, load_model
-from nano_vllm.worker.model_runner import ModelRunner
+from pico_vllm.config import Config
+from pico_vllm.core.paged_kv_cache import PagedKVCache, num_blocks_from_capacity
+from pico_vllm.core.scheduler import Scheduler
+from pico_vllm.models.qwen3 import Qwen3ForCausalLM
+from pico_vllm.sampler import sample
+from pico_vllm.sampling_params import SamplingParams
+from pico_vllm.sequence import Sequence
+from pico_vllm.utils.loader import init_on, load_model
+from pico_vllm.worker.model_runner import ModelRunner
 
 
 def build_model(config: Config) -> Qwen3ForCausalLM:

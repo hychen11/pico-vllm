@@ -12,8 +12,8 @@ Each step is either a prefill batch or a decode batch, never both:
 
 from collections import deque
 
-from nano_vllm.core.block_manager import BlockManager
-from nano_vllm.sequence import Sequence, SequenceStatus
+from pico_vllm.core.block_manager import BlockManager
+from pico_vllm.sequence import Sequence, SequenceStatus
 
 
 class Scheduler:

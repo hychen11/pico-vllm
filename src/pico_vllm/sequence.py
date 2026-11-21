@@ -3,7 +3,7 @@
 from enum import Enum, auto
 from itertools import count
 
-from nano_vllm.sampling_params import SamplingParams
+from pico_vllm.sampling_params import SamplingParams
 
 
 class SequenceStatus(Enum):

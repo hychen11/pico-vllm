@@ -1,4 +1,4 @@
-# nano-vLLM implementation roadmap
+# pico-vLLM implementation roadmap
 
 This project has two tracks:
 
@@ -15,7 +15,7 @@ Track A is the immediate goal. It should be small, focused, and functional befor
 
 **Implement**
 
-- `src/nano_vllm/__init__.py` and a minimal `src/nano_vllm/cli.py`;
+- `src/pico_vllm/__init__.py` and a minimal `src/pico_vllm/cli.py`;
 - `.gitignore` for virtual environments, Python caches, IDE files, coverage, and local model directories;
 - `tests/test_package.py` and `tests/conftest.py`;
 - keep Qwen loading dependencies optional: `uv sync --extra dev --extra model` is only needed from M3 onward.
@@ -36,8 +36,8 @@ uv run pytest -q
 **Files**
 
 ```text
-src/nano_vllm/sampling_params.py
-src/nano_vllm/sequence.py
+src/pico_vllm/sampling_params.py
+src/pico_vllm/sequence.py
 tests/unit/test_sampling_params.py
 tests/unit/test_sequence.py
 ```
@@ -60,8 +60,8 @@ tests/unit/test_sequence.py
 **Files**
 
 ```text
-src/nano_vllm/core/block_manager.py
-src/nano_vllm/core/scheduler.py
+src/pico_vllm/core/block_manager.py
+src/pico_vllm/core/scheduler.py
 tests/unit/test_block_manager.py
 tests/unit/test_scheduler.py
 ```
@@ -85,10 +85,10 @@ tests/unit/test_scheduler.py
 **Files**
 
 ```text
-src/nano_vllm/config.py
-src/nano_vllm/layers/{activation,layernorm,rotary_embedding,linear}.py
-src/nano_vllm/models/qwen3.py
-src/nano_vllm/utils/loader.py
+src/pico_vllm/config.py
+src/pico_vllm/layers/{activation,layernorm,rotary_embedding,linear}.py
+src/pico_vllm/models/qwen3.py
+src/pico_vllm/utils/loader.py
 tests/unit/test_rms_norm.py
 tests/unit/test_rope.py
 tests/unit/test_qwen3_shapes.py
@@ -112,8 +112,8 @@ tests/unit/test_qwen3_shapes.py
 **Files**
 
 ```text
-src/nano_vllm/core/paged_kv_cache.py
-src/nano_vllm/worker/model_runner.py
+src/pico_vllm/core/paged_kv_cache.py
+src/pico_vllm/worker/model_runner.py
 tests/unit/test_paged_kv_cache.py
 tests/integration/test_runner_fake_model.py
 ```
@@ -137,9 +137,9 @@ tests/integration/test_runner_fake_model.py
 **Files**
 
 ```text
-src/nano_vllm/engine/llm_engine.py
-src/nano_vllm/llm.py
-src/nano_vllm/tokenizer.py
+src/pico_vllm/engine/llm_engine.py
+src/pico_vllm/llm.py
+src/pico_vllm/tokenizer.py
 example.py
 tests/integration/test_llm_engine.py
 ```
@@ -152,7 +152,7 @@ tests/integration/test_llm_engine.py
 - local `AutoTokenizer` use, EOS propagation, greedy sampling and temperature sampling;
 - an example that runs a local `Qwen/Qwen3-0.6B` checkpoint.
 
-**Tests:** two fake-model requests interleave correctly; EOS/length cleanup releases blocks; a local-model smoke test is skipped unless `NANO_VLLM_QWEN_MODEL` is set; when provisioned, greedy next-token output matches Hugging Face for a fixed prompt.
+**Tests:** two fake-model requests interleave correctly; EOS/length cleanup releases blocks; a local-model smoke test is skipped unless `PICO_VLLM_QWEN_MODEL` is set; when provisioned, greedy next-token output matches Hugging Face for a fixed prompt.
 
 **Commit:** `feat: add offline qwen3 generation api`
 

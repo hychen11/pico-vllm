@@ -5,9 +5,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from nano_vllm.core.paged_kv_cache import PagedKVCache
-from nano_vllm.kernels import kv_store
-from nano_vllm.worker.model_runner import slot_mapping_for
+from pico_vllm.core.paged_kv_cache import PagedKVCache
+from pico_vllm.kernels import kv_store
+from pico_vllm.worker.model_runner import slot_mapping_for
 
 pytestmark = [
     pytest.mark.cuda,

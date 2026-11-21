@@ -2,7 +2,7 @@
 
 import pytest
 
-from nano_vllm.sampling_params import SamplingParams
+from pico_vllm.sampling_params import SamplingParams
 
 
 def test_defaults_and_explicit_values() -> None:

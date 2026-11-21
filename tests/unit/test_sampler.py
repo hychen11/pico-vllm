@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from nano_vllm.sampler import sample
+from pico_vllm.sampler import sample
 
 VOCAB = 10
 

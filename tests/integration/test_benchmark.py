@@ -6,7 +6,7 @@ import pytest
 import torch
 
 pytest.importorskip("transformers")
-from nano_vllm.benchmark import make_prompts, qwen3_0_6b_config, run_benchmark  # noqa: E402
+from pico_vllm.benchmark import make_prompts, qwen3_0_6b_config, run_benchmark  # noqa: E402
 
 pytestmark = pytest.mark.integration
 

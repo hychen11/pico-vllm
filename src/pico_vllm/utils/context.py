@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import torch
 
 if TYPE_CHECKING:
-    from nano_vllm.core.paged_kv_cache import PagedKVCache
+    from pico_vllm.core.paged_kv_cache import PagedKVCache
 
 
 @dataclass

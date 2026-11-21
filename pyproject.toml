@@ -3,14 +3,14 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "nano-vllm"
+name = "pico-vllm"
 version = "0.1.0"
 description = "A small, test-driven vLLM-inspired inference engine for Qwen3 models"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [
-  { name = "nano-vLLM contributors" },
+  { name = "pico-vLLM contributors" },
 ]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
@@ -46,10 +46,10 @@ dev = [
 ]
 
 [project.scripts]
-nano-vllm = "nano_vllm.cli:main"
+pico-vllm = "pico_vllm.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/nano_vllm"]
+packages = ["src/pico_vllm"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
@@ -57,7 +57,7 @@ testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 markers = [
   "cuda: requires a CUDA device",
-  "integration: exercises multiple nano_vllm components",
+  "integration: exercises multiple pico_vllm components",
   "model: requires an explicitly provisioned local Qwen checkpoint",
   "benchmark: non-blocking performance test",
 ]

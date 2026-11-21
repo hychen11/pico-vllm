@@ -1,19 +1,19 @@
-"""Command-line entry point for nano-vLLM."""
+"""Command-line entry point for pico-vLLM."""
 
 from __future__ import annotations
 
 import argparse
 
-from nano_vllm import __version__
+from pico_vllm import __version__
 
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the command-line parser used by the package entry point."""
     parser = argparse.ArgumentParser(
-        prog="nano-vllm",
+        prog="pico-vllm",
         description="A small, vLLM-inspired inference engine for Qwen3 models.",
     )
-    parser.add_argument("--version", action="version", version=f"nano-vllm {__version__}")
+    parser.add_argument("--version", action="version", version=f"pico-vllm {__version__}")
     return parser
 
 

@@ -2,7 +2,7 @@
 
 Most tests build an engine around a tiny random Qwen3 with token-id prompts and
 no tokenizer: ``LLMEngine(scheduler, runner, eos_token_id)``. The last test runs a
-real checkpoint and is skipped unless ``NANO_VLLM_QWEN_MODEL`` is set.
+real checkpoint and is skipped unless ``PICO_VLLM_QWEN_MODEL`` is set.
 """
 
 from __future__ import annotations
@@ -12,16 +12,16 @@ import os
 import pytest
 import torch
 
-from nano_vllm.core.paged_kv_cache import PagedKVCache
-from nano_vllm.core.scheduler import Scheduler
-from nano_vllm.engine.llm_engine import LLMEngine
-from nano_vllm.llm import LLM
-from nano_vllm.sampling_params import SamplingParams
-from nano_vllm.sequence import Sequence, SequenceStatus
-from nano_vllm.worker.model_runner import ModelRunner
+from pico_vllm.core.paged_kv_cache import PagedKVCache
+from pico_vllm.core.scheduler import Scheduler
+from pico_vllm.engine.llm_engine import LLMEngine
+from pico_vllm.llm import LLM
+from pico_vllm.sampling_params import SamplingParams
+from pico_vllm.sequence import Sequence, SequenceStatus
+from pico_vllm.worker.model_runner import ModelRunner
 
 transformers = pytest.importorskip("transformers")
-from nano_vllm.models.qwen3 import Qwen3ForCausalLM  # noqa: E402
+from pico_vllm.models.qwen3 import Qwen3ForCausalLM  # noqa: E402
 
 pytestmark = pytest.mark.integration
 
@@ -209,11 +209,11 @@ def test_sampled_requests_finish_with_valid_tokens(model: Qwen3ForCausalLM) -> N
 
 # --- real checkpoint --------------------------------------------------------------
 
-MODEL_PATH = os.environ.get("NANO_VLLM_QWEN_MODEL")
+MODEL_PATH = os.environ.get("PICO_VLLM_QWEN_MODEL")
 
 
 @pytest.mark.model
-@pytest.mark.skipif(not MODEL_PATH, reason="set NANO_VLLM_QWEN_MODEL to a local Qwen3 dir")
+@pytest.mark.skipif(not MODEL_PATH, reason="set PICO_VLLM_QWEN_MODEL to a local Qwen3 dir")
 def test_greedy_generate_matches_transformers() -> None:
     max_tokens = 16
     prompts = ["The capital of France is", "def fibonacci(n):"]

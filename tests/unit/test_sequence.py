@@ -1,7 +1,7 @@
 """Tests for the M1 sequence state and token history."""
 
-from nano_vllm.sampling_params import SamplingParams
-from nano_vllm.sequence import Sequence, SequenceStatus
+from pico_vllm.sampling_params import SamplingParams
+from pico_vllm.sequence import Sequence, SequenceStatus
 
 
 def test_num_tokens_and_last_token_follow_appends() -> None:

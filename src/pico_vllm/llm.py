@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from nano_vllm.config import Config
-from nano_vllm.engine.llm_engine import LLMEngine
-from nano_vllm.sampling_params import SamplingParams
+from pico_vllm.config import Config
+from pico_vllm.engine.llm_engine import LLMEngine
+from pico_vllm.sampling_params import SamplingParams
 
 
 class LLM:

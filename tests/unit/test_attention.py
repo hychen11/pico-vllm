@@ -4,10 +4,10 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from nano_vllm.core.paged_kv_cache import PagedKVCache
-from nano_vllm.layers.attention import Attention, causal_attention
-from nano_vllm.utils.context import Context, reset_context, set_context
-from nano_vllm.worker.model_runner import slot_mapping_for
+from pico_vllm.core.paged_kv_cache import PagedKVCache
+from pico_vllm.layers.attention import Attention, causal_attention
+from pico_vllm.utils.context import Context, reset_context, set_context
+from pico_vllm.worker.model_runner import slot_mapping_for
 
 HEADS, KV_HEADS, D, BS = 4, 2, 8, 4
 SCALE = D**-0.5

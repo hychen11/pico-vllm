@@ -3,8 +3,8 @@
 import pytest
 import torch
 
-from nano_vllm.core.paged_kv_cache import PagedKVCache, num_blocks_from_capacity
-from nano_vllm.worker.model_runner import slot_mapping_for
+from pico_vllm.core.paged_kv_cache import PagedKVCache, num_blocks_from_capacity
+from pico_vllm.worker.model_runner import slot_mapping_for
 
 BS, LAYERS, KV_HEADS, HEAD_DIM = 4, 2, 2, 3
 

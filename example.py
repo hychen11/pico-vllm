@@ -10,8 +10,8 @@ import os
 import sys
 import time
 
-from nano_vllm.llm import LLM
-from nano_vllm.sampling_params import SamplingParams
+from pico_vllm.llm import LLM
+from pico_vllm.sampling_params import SamplingParams
 
 
 def main(model_path: str) -> None:

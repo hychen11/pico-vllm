@@ -1,10 +1,14 @@
-# nano-vLLM
+# pico-vLLM
 
-`nano-vLLM` is a single-GPU, single-process inference engine for learning the core ideas behind vLLM. The project deliberately focuses on the execution path that matters most: request lifecycle, continuous batching, KV-cache allocation, paged memory, and testable text generation.
+`pico-vLLM` is a single-GPU, single-process inference engine for learning the core ideas behind vLLM. The project deliberately focuses on the execution path that matters most: request lifecycle, continuous batching, KV-cache allocation, paged memory, and testable text generation.
 
 The immediate target is a compact core replica for a dense **Qwen3 decoder-only** checkpoint, loaded from a Hugging Face-compatible local directory. Qwen3 provides the important real inference features—RMSNorm, RoPE, grouped-query attention (GQA), Q/K normalization, and SwiGLU—without multimodal or MoE complexity.
 
 The milestone-by-milestone plan is in [ROADMAP.md](ROADMAP.md).
+
+## Recommended reading
+
+- [AIInfraGuide — AI Infra 全栈知识库](https://caomaolufei.github.io/AIInfraGuide/): a Chinese guide to the AI infrastructure stack, covering CUDA kernel optimization, distributed training, inference optimization, and performance analysis. Useful background for the paged KV cache, FlashAttention, and CUDA Graph work in this project.
 
 ## Scope
 
@@ -26,7 +30,7 @@ It intentionally defers distributed execution, quantization, LoRA, multimodal mo
 ├── pyproject.toml
 ├── README.md
 ├── ROADMAP.md
-├── src/nano_vllm/
+├── src/pico_vllm/
 │   ├── config.py
 │   ├── sampling_params.py
 │   ├── sequence.py
@@ -98,7 +102,7 @@ Important implementation details:
 - RoPE positions must be identical in prefill and decode paths.
 - Qwen3 needs its configuration read exactly: Q/K normalization, projection bias, and RoPE settings must come from the selected checkpoint rather than from hard-coded assumptions.
 - The initial implementation supports the checkpoint's normal RoPE settings. Long-context RoPE scaling is a later extension.
-- Unit tests use a fake runner only. Real-model parity tests receive a local checkpoint through `NANO_VLLM_QWEN_MODEL=/absolute/path` and skip if absent.
+- Unit tests use a fake runner only. Real-model parity tests receive a local checkpoint through `PICO_VLLM_QWEN_MODEL=/absolute/path` and skip if absent.
 
 ## Component boundaries
 
