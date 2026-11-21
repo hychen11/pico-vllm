@@ -217,8 +217,9 @@ MODEL_PATH = os.environ.get("NANO_VLLM_QWEN_MODEL")
 def test_greedy_generate_matches_transformers() -> None:
     max_tokens = 16
     prompts = ["The capital of France is", "def fibonacci(n):"]
+    # Exact token match with HF needs the same numerics: pin CPU + float32.
     llm = LLM(MODEL_PATH, max_model_len=256, kvcache_block_size=16,
-              kvcache_capacity_bytes=256 * 2**20)
+              kvcache_capacity_bytes=256 * 2**20, device="cpu", dtype="float32")
     outputs = llm.generate(prompts, SamplingParams(temperature=GREEDY, max_tokens=max_tokens,
                                                    ignore_eos=True))
 

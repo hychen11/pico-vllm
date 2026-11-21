@@ -30,6 +30,10 @@ model = [
   "safetensors>=0.4",
   "tokenizers>=0.20",
 ]
+# M6 CUDA fast path. Linux CUDA torch wheels already ship Triton; this pins it explicitly.
+cuda = [
+  "triton>=3.0; sys_platform == 'linux'",
+]
 api = [
   "fastapi>=0.115",
   "uvicorn[standard]>=0.30",

@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import torch
 
+from nano_vllm.kernels import kv_store
+
 
 class PagedKVCache:
     """K/V tensors shaped ``[num_layers, num_blocks, block_size, num_kv_heads, head_dim]``."""
@@ -26,11 +28,20 @@ class PagedKVCache:
             head_dim: int,
             dtype: torch.dtype = torch.float32,
             device: torch.device | str = "cpu",
+            use_triton: bool | None = None,
     ) -> None:
-        """Allocate ``self.k_cache`` and ``self.v_cache`` (zeros) with the shape above."""
+        """Allocate ``self.k_cache`` and ``self.v_cache`` (zeros) with the shape above.
+
+        ``use_triton``: write through the Triton kernel (M6). ``None`` = whenever the
+        cache is on CUDA and Triton is importable; ``False`` forces the eager path.
+        """
         shape = (num_layers, num_blocks, block_size, num_kv_heads, head_dim)
         self.k_cache = torch.zeros(shape, dtype=dtype, device=device)
         self.v_cache = torch.zeros(shape, dtype=dtype, device=device)
+        available = self.k_cache.is_cuda and kv_store.HAS_TRITON
+        if use_triton and not available:
+            raise ValueError("use_triton=True needs a CUDA cache and an importable triton")
+        self.use_triton = available if use_triton is None else use_triton
 
     def write(
             self, layer: int, k: torch.Tensor, v: torch.Tensor, slot_mapping: torch.Tensor
@@ -40,6 +51,11 @@ class PagedKVCache:
         k, v: ``[num_tokens, num_kv_heads, head_dim]``; slot_mapping: ``[num_tokens]``.
         Token ``i`` goes to flat slot ``slot_mapping[i]``.
         """
+        if self.use_triton:
+            kv_store.store_kvcache(
+                k, v, self.k_cache[layer], self.v_cache[layer], slot_mapping
+            )
+            return
         num_tokens, num_kv_heads, head_dim = k.shape
         self.k_cache[layer].view(-1, num_kv_heads, head_dim)[slot_mapping] = k
         self.v_cache[layer].view(-1, num_kv_heads, head_dim)[slot_mapping] = v

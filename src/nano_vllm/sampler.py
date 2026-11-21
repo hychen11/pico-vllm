@@ -23,6 +23,7 @@ def sample(
     A batch may mix greedy and sampled rows.
     Returns one token id per row, in row order.
     """
+    logits = logits.float()  # bf16/fp16 models: softmax and multinomial in fp32
     greedy = torch.argmax(logits, dim=-1)
     t = torch.where(temperatures == 0, 1, temperatures)
     probs = torch.softmax(logits / t[:, None], dim=-1)

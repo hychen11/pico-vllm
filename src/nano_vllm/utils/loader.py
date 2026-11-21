@@ -3,11 +3,29 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from glob import glob
 
 import torch
 from torch import nn
+
+
+@contextmanager
+def init_on(device: torch.device | str, dtype: torch.dtype) -> Iterator[None]:
+    """Construct modules with parameters allocated directly on ``device`` in ``dtype``.
+
+    Avoids building an fp32 CPU copy first and then ``.to(device, dtype)``. Buffers
+    created with an explicit dtype (RoPE's float32 ``cos_sin_cache``) keep it, whereas
+    ``module.to(bfloat16)`` would downcast them too.
+    """
+    old_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    try:
+        with torch.device(device):
+            yield
+    finally:
+        torch.set_default_dtype(old_dtype)
 
 
 def default_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor) -> None:

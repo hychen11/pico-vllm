@@ -22,8 +22,16 @@ from nano_vllm.models.qwen3 import Qwen3ForCausalLM
 from nano_vllm.sampler import sample
 from nano_vllm.sampling_params import SamplingParams
 from nano_vllm.sequence import Sequence
-from nano_vllm.utils.loader import load_model
+from nano_vllm.utils.loader import init_on, load_model
 from nano_vllm.worker.model_runner import ModelRunner
+
+
+def build_model(config: Config) -> Qwen3ForCausalLM:
+    """Native Qwen3 with checkpoint weights, on ``config.device`` in ``config.dtype``."""
+    with init_on(config.device, config.dtype):
+        model = Qwen3ForCausalLM(config.hf_config)
+    load_model(model, config.model)  # copy_ casts checkpoint dtype/device as needed
+    return model.eval()
 
 
 class LLMEngine:
@@ -49,20 +57,17 @@ class LLMEngine:
     def from_config(cls, config: Config) -> LLMEngine:
         """Build every component for the local checkpoint ``config.model``.
 
-        - ``Qwen3ForCausalLM(config.hf_config)`` + ``load_model(model, config.model)``;
-        - ``PagedKVCache`` sized by ``num_blocks_from_capacity`` (pick a capacity);
+        - ``build_model(config)``: weights on ``config.device`` in ``config.dtype``;
+        - ``PagedKVCache`` sized by ``num_blocks_from_capacity``, on the same device/dtype;
         - ``Scheduler`` and ``PagedKVCache`` must share ``num_blocks`` and block size;
         - set ``Sequence.block_size = config.kvcache_block_size`` (class attribute!);
         - ``AutoTokenizer.from_pretrained(config.model)``; EOS id from the tokenizer.
         """
-
-        model = Qwen3ForCausalLM(config.hf_config)
-        load_model(model, config.model)
-        model.eval()
+        model = build_model(config)
 
         hf = config.hf_config
         head_dim = getattr(hf, "head_dim", None) or hf.hidden_size // hf.num_attention_heads
-        dtype = next(model.parameters()).dtype
+        dtype = config.dtype
         block_size = config.kvcache_block_size
         num_blocks = num_blocks_from_capacity(
             config.kvcache_capacity_bytes, hf.num_hidden_layers, block_size,
@@ -71,7 +76,7 @@ class LLMEngine:
 
         kv_cache = PagedKVCache(
             hf.num_hidden_layers, num_blocks, block_size, hf.num_key_value_heads, head_dim,
-            dtype=dtype,
+            dtype=dtype, device=config.device,
         )
         Sequence.block_size = block_size
         scheduler = Scheduler(
