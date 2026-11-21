@@ -73,7 +73,11 @@ def store_kvcache(
     assert slot_mapping.numel() == num_tokens
     k, v = _row_major(k), _row_major(v)
     row = num_kv_heads * head_dim
-    _store_kvcache_kernel[(num_tokens,)](
-        k, k.stride(0), v, v.stride(0), k_cache, v_cache, slot_mapping,
-        ROW=row, BLOCK=triton.next_power_of_2(row),
-    )
+    # Triton compiles for, and launches on, the *current* CUDA device, not the device of
+    # its arguments. Make that the cache's device so e.g. a cache on cuda:1 works while
+    # cuda:0 is current (otherwise: "no kernel image is available" or a wrong-GPU launch).
+    with torch.cuda.device(k_cache.device):
+        _store_kvcache_kernel[(num_tokens,)](
+            k, k.stride(0), v, v.stride(0), k_cache, v_cache, slot_mapping,
+            ROW=row, BLOCK=triton.next_power_of_2(row),
+        )

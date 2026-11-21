@@ -66,6 +66,11 @@ pico-vllm = "pico_vllm.cli:main"
 [tool.hatch.version]
 path = "src/pico_vllm/__init__.py"
 
+[tool.uv]
+# The version is dynamic (read from __init__.py), so by default uv rebuilds the
+# editable install on every `uv run`. Rebuild only when these files change.
+cache-keys = [{ file = "pyproject.toml" }, { file = "src/pico_vllm/__init__.py" }]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/pico_vllm"]
 

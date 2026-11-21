@@ -80,6 +80,26 @@ def test_decode_step_one_token_per_seq() -> None:
     assert_same(fast, eager)
 
 
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires 2 CUDA devices")
+def test_cache_on_non_current_device() -> None:
+    """Triton launches on the *current* device; a cache on another GPU must still work."""
+    device = torch.device("cuda", torch.cuda.device_count() - 1)
+    assert torch.cuda.current_device() != device.index
+
+    def make(use_triton: bool) -> PagedKVCache:
+        return PagedKVCache(LAYERS, NUM_BLOCKS, BS, 8, 128, dtype=torch.bfloat16,
+                            device=device, use_triton=use_triton)
+
+    fast, eager = make(True), make(False)
+    slot_mapping = torch.tensor(slot_mapping_for([12, 7, 3], BS, 0, 10), device=device)
+    k = torch.randn(10, 8, 128, device=device, dtype=torch.bfloat16)
+    v = torch.randn_like(k)
+    fast.write(1, k, v, slot_mapping)
+    eager.write(1, k, v, slot_mapping)
+    assert_same(fast, eager)
+    assert torch.cuda.current_device() != device.index  # current device is restored
+
+
 def test_auto_selection() -> None:
     assert PagedKVCache(1, 2, BS, 1, 4, device="cuda").use_triton
     assert not PagedKVCache(1, 2, BS, 1, 4, device="cpu").use_triton

@@ -128,7 +128,9 @@ Triton kernel 本身更快，kernel 数量也更少，应当保留。但当前�
 Triton Error [CUDA]: no kernel image is available for execution on the device
 ```
 
-原因是 Triton 按当前默认 GPU（`cuda:0`，即 5090，sm_120）编译和启动 kernel，而数据在 `cuda:1`（4060，sm_89）上。修法是在 `kernels/kv_store.py` 启动 kernel 时包一层 `with torch.cuda.device(k.device):`，并补一个在非默认卡上运行的测试。本报告中 4060 的数据是用 `CUDA_VISIBLE_DEVICES=1` 绕过这个问题得到的，代码没有修改。
+原因是 Triton 按当前默认 GPU（`cuda:0`，即 5090，sm_120）编译和启动 kernel，而数据在 `cuda:1`（4060，sm_89）上。本报告中 4060 的数据是用 `CUDA_VISIBLE_DEVICES=1` 绕过这个问题得到的。
+
+**已修复（2026-11-21）**：`kernels/kv_store.py` 启动 kernel 时包一层 `with torch.cuda.device(k_cache.device):`，并新增测试 `tests/cuda/test_triton_store.py::test_cache_on_non_current_device`（少于 2 张 GPU 时跳过）。修复后 `--device cuda:1` 可以直接运行，不再需要 `CUDA_VISIBLE_DEVICES`。
 
 **正确性**：设置 `PICO_VLLM_QWEN_MODEL` 后，完整测试 184 个全部通过，包括真实权重测试和 Triton 与 eager 的对比测试。
 
@@ -141,9 +143,9 @@ Triton Error [CUDA]: no kernel image is available for execution on the device
 uv run python -m pico_vllm.benchmark --device cuda:0
 uv run python -m pico_vllm.benchmark --device cuda:0 --no-triton
 
-# 端到端：4060（bug 修复前，必须只让程序看到这张卡）
-CUDA_VISIBLE_DEVICES=1 uv run python -m pico_vllm.benchmark --device cuda --kv-cache-gib 2
-CUDA_VISIBLE_DEVICES=1 uv run python -m pico_vllm.benchmark --device cuda --kv-cache-gib 2 --no-triton
+# 端到端：4060（多卡 bug 已修复，可直接指定 cuda:1）
+uv run python -m pico_vllm.benchmark --device cuda:1 --kv-cache-gib 2
+uv run python -m pico_vllm.benchmark --device cuda:1 --kv-cache-gib 2 --no-triton
 
 # 正确性：全部测试，包括真实权重
 PICO_VLLM_QWEN_MODEL=$HOME/models/Qwen3-0.6B uv run pytest -q

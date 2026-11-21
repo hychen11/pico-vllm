@@ -59,7 +59,7 @@ uv run python -m pico_vllm.benchmark --device cpu --dtype float32      # 第 0 �
 
 原始数据：prefill 49012 / 48710，decode 275.0 / 269.0。
 
-**已知问题**：数据不在默认 GPU 上时（如 `--device cuda:1`），Triton kernel 会因为按默认 GPU 编译而报错 `no kernel image is available`。待修复，修法见实验报告。
+**已修复的问题**：数据不在默认 GPU 上时（如 `--device cuda:1`），Triton kernel 曾因按默认 GPU 编译而报错 `no kernel image is available`。现在启动 kernel 前会切换到 cache 所在的 GPU，并有对应测试。
 
 ### 4. FlashAttention 2（待做）
 
