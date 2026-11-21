@@ -1,8 +1,8 @@
 # pico-vLLM
 
-`pico-vLLM` is a single-GPU, single-process inference engine for learning the core ideas behind vLLM. The project deliberately focuses on the execution path that matters most: request lifecycle, continuous batching, KV-cache allocation, paged memory, and testable text generation.
+`pico-vLLM` is a small, test-driven LLM inference engine for learning the core ideas behind vLLM: request lifecycle, continuous batching, paged KV-cache allocation, prefix caching, chunked prefill, and a CUDA fast path. It runs dense **Qwen3** checkpoints from a local Hugging Face directory, on a single GPU or on the CPU.
 
-The immediate target is a compact core replica for a dense **Qwen3 decoder-only** checkpoint, loaded from a Hugging Face-compatible local directory. Qwen3 provides the important real inference features—RMSNorm, RoPE, grouped-query attention (GQA), Q/K normalization, and SwiGLU—without multimodal or MoE complexity.
+The scheduler and block manager follow the design of [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm). pico-vLLM adds a CPU-runnable eager path, an explicit `PagedKVCache` object, greedy sampling, and a test suite (184 tests), so every component can be checked in isolation. See [docs/design-vs-nano-vllm.md](docs/design-vs-nano-vllm.md) for the full comparison.
 
 The milestone-by-milestone plan is in [ROADMAP.md](ROADMAP.md).
 
@@ -10,18 +10,81 @@ The milestone-by-milestone plan is in [ROADMAP.md](ROADMAP.md).
 
 - [AIInfraGuide — AI Infra 全栈知识库](https://caomaolufei.github.io/AIInfraGuide/): a Chinese guide to the AI infrastructure stack, covering CUDA kernel optimization, distributed training, inference optimization, and performance analysis. Useful background for the paged KV cache, FlashAttention, and CUDA Graph work in this project.
 
-## Scope
+## Status
 
-The first track will support:
+| Milestone | Content | Status |
+| --- | --- | --- |
+| M0–M2 | project setup, `Sequence`, `SamplingParams`, `BlockManager`, `Scheduler` | done |
+| M3 | native Qwen3 model and safetensors loader | done |
+| M4 | `PagedKVCache` and `ModelRunner` | done |
+| M5 | offline `LLM.generate` API | done |
+| M6 | CUDA fast path | in progress: GPU + bf16 and the Triton KV-store kernel are done; FlashAttention, automatic KV sizing, and CUDA Graph are next |
 
-- decoder-only Qwen-style autoregressive generation;
-- continuous batching across several requests;
-- paged KV-cache allocation, sharing, release, and copy-on-write;
-- greedy, temperature, top-k, top-p, EOS, and `max_tokens` controls;
-- deterministic CPU tests with a fake model runner;
-- a single-GPU Qwen3 runner and an offline Python API.
+Measured on an RTX 5090 with the fixed benchmark workload, M6 so far raises prefill from 437 to about 49,000 tok/s (112×) and decode from 62 to about 275 tok/s (4.4×) over the M5 CPU baseline. Decode is currently limited by the eager attention loop; see [docs/m6-optimizations.md](docs/m6-optimizations.md).
 
-It intentionally defers distributed execution, quantization, LoRA, multimodal models, mixture-of-experts, speculative decoding, HTTP serving, custom CUDA/Triton kernels, and production authentication. They belong to the later hardening track, not the initial core replica.
+## Features
+
+- Qwen3 decoder-only models: RMSNorm, RoPE, grouped-query attention, Q/K normalization, SwiGLU; fused QKV and gate/up projections.
+- Continuous batching under `max_num_seqs` and `max_num_batched_tokens` budgets.
+- Paged KV cache with block tables and ref-counted blocks.
+- Prefix caching: full blocks are hashed (xxhash, chained) and shared between requests with the same prefix.
+- Chunked prefill: a prompt longer than the step's remaining token budget is split across steps.
+- Preemption: when blocks run out during decode, the newest sequence is freed and requeued.
+- Sampling: greedy (`temperature=0`) and temperature sampling, mixed freely within one batch; EOS, `max_tokens`, `ignore_eos`.
+- CUDA fast path: bf16 by default on GPU, Triton KV-store kernel; eager fallback on CPU.
+
+Not in scope yet: top-k/top-p, tensor parallelism, quantization, LoRA, multimodal and MoE models, speculative decoding, HTTP serving.
+
+## Installation
+
+From PyPI:
+
+```bash
+pip install "pico-vllm[model]"          # + transformers/safetensors to load Qwen3 checkpoints
+pip install "pico-vllm[model,cuda]"     # + Triton for the CUDA fast path (Linux)
+```
+
+For development, install [uv](https://docs.astral.sh/uv/getting-started/installation/) once, then from the repository root:
+
+```bash
+uv sync --extra dev --extra model --extra cuda
+uv run pytest -q
+```
+
+`uv run` uses the project's `.venv` even if your shell shows Conda `(base)`.
+
+FlashAttention 2 is not a declared dependency yet (it is needed from M6 step 4). It has to be built for your GPU, for example from the [flash-attention](https://github.com/Dao-AILab/flash-attention) source. Note that `uv sync` removes packages that `pyproject.toml` does not declare, so reinstall it afterwards or use `uv sync --inexact`.
+
+## Usage
+
+Download a checkpoint and generate:
+
+```bash
+uv run hf download Qwen/Qwen3-0.6B --local-dir ~/models/Qwen3-0.6B
+uv run python example.py ~/models/Qwen3-0.6B
+```
+
+```python
+from pico_vllm.llm import LLM
+from pico_vllm.sampling_params import SamplingParams
+
+llm = LLM("/path/to/Qwen3-0.6B", max_model_len=1024)   # device="auto", dtype="auto"
+outputs = llm.generate(
+    ["The capital of France is", "def fibonacci(n):"],
+    [SamplingParams(temperature=0.0, max_tokens=32),     # greedy
+     SamplingParams(temperature=0.6, max_tokens=64)],
+)
+print(outputs[0]["text"], outputs[0]["token_ids"])
+```
+
+`LLM` accepts the `Config` fields as keyword arguments: `max_num_seqs`, `max_num_batched_tokens`, `max_model_len`, `kvcache_block_size`, `kvcache_capacity_bytes`, `device` (`"auto"`, `"cuda:0"`, `"cpu"`), and `dtype` (`"auto"`, `"bfloat16"`, `"float16"`, `"float32"`). With `"auto"`, the engine uses CUDA with the checkpoint dtype (or bf16) when a GPU is available, and CPU with fp32 otherwise.
+
+Benchmark with a randomly initialized model of Qwen3-0.6B shape (no download needed):
+
+```bash
+uv run python -m pico_vllm.benchmark --device cuda:0
+uv run python -m pico_vllm.benchmark --device cuda:0 --no-triton   # eager KV writes
+```
 
 ## Repository layout
 
@@ -30,64 +93,42 @@ It intentionally defers distributed execution, quantization, LoRA, multimodal mo
 ├── pyproject.toml
 ├── README.md
 ├── ROADMAP.md
+├── example.py                # generate with a local Qwen3 checkpoint
+├── docs/                     # optimization log, experiment reports, design notes
 ├── src/pico_vllm/
-│   ├── config.py
+│   ├── llm.py                # offline LLM.generate API
+│   ├── config.py             # Config, device/dtype resolution
 │   ├── sampling_params.py
 │   ├── sequence.py
-│   ├── core/                 # scheduler, blocks, KV cache
-│   ├── engine/               # LLMEngine and output events
-│   ├── worker/               # model runners
-│   ├── model_executor/       # Qwen layers and weight loader
-│   └── entrypoints/          # CLI and HTTP API
+│   ├── sampler.py
+│   ├── benchmark.py          # fixed throughput workload
+│   ├── cli.py
+│   ├── core/                 # block_manager, scheduler, paged_kv_cache
+│   ├── engine/               # LLMEngine
+│   ├── worker/               # ModelRunner
+│   ├── models/               # Qwen3
+│   ├── layers/               # attention, linear, layernorm, rotary_embedding, activation
+│   ├── kernels/              # Triton KV-store kernel
+│   └── utils/                # step Context, weight loader
 └── tests/
     ├── unit/
     ├── integration/
-    └── conftest.py
+    └── cuda/
 ```
 
-## Installation
+## Documentation
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) once. From the repository root, create the project environment and install the development tools:
+| Document | Content |
+| --- | --- |
+| [ROADMAP.md](ROADMAP.md) | milestones M0–M10 and their tests |
+| [docs/m6-optimizations.md](docs/m6-optimizations.md) | each M6 optimization: what improved, how, and by how much |
+| [docs/experiments/m6-triton-kv-store.md](docs/experiments/m6-triton-kv-store.md) | Triton KV-store experiment and environment |
+| [docs/design-vs-nano-vllm.md](docs/design-vs-nano-vllm.md) | M1–M5 design compared with nano-vllm |
+| [docs/concepts/decode-attention-and-cuda-graph.md](docs/concepts/decode-attention-and-cuda-graph.md) | decode FlashAttention inputs and why decode steps can be captured as CUDA graphs |
 
-```bash
-uv sync --extra dev
-uv run pytest -q
-```
+## Qwen3 forward path
 
-`uv sync` creates `.venv` and installs the project in editable mode. `uv run` uses that environment even if your shell still shows Conda `(base)`, avoiding unrelated global pytest plugins.
-
-Install the Qwen loading dependencies at M3. The web dependencies are only needed at M9:
-
-```bash
-uv sync --extra dev --extra model
-uv sync --extra dev --extra model --extra api
-```
-
-`pyproject.toml` deliberately keeps `transformers`, FastAPI, and Uvicorn optional. The scheduler/cache unit tests must remain fast and independent of network access, model downloads, and CUDA.
-
-## Qwen3 model boundary
-
-Start with a small dense Qwen3 model, preferably `Qwen/Qwen3-0.6B`. Parse `config.json` into a local `QwenConfig`; do not make scheduler and cache code depend on Hugging Face configuration objects.
-
-```python
-@dataclass(frozen=True)
-class Qwen3Config:
-    vocab_size: int
-    hidden_size: int
-    intermediate_size: int
-    num_hidden_layers: int
-    num_attention_heads: int
-    num_key_value_heads: int
-    head_dim: int
-    rms_norm_eps: float
-    rope_theta: float
-    max_position_embeddings: int
-    tie_word_embeddings: bool
-    attention_bias: bool
-    use_qk_norm: bool
-```
-
-The forward path is:
+The model reads its settings from the checkpoint's `config.json` (through `transformers.AutoConfig`); the scheduler and cache code never depend on Hugging Face objects.
 
 ```text
 token ids → embedding
@@ -96,32 +137,24 @@ token ids → embedding
   → final RMSNorm → LM head → logits
 ```
 
-Important implementation details:
-
 - GQA means `num_key_value_heads` may be smaller than `num_attention_heads`.
-- RoPE positions must be identical in prefill and decode paths.
-- Qwen3 needs its configuration read exactly: Q/K normalization, projection bias, and RoPE settings must come from the selected checkpoint rather than from hard-coded assumptions.
-- The initial implementation supports the checkpoint's normal RoPE settings. Long-context RoPE scaling is a later extension.
-- Unit tests use a fake runner only. Real-model parity tests receive a local checkpoint through `PICO_VLLM_QWEN_MODEL=/absolute/path` and skip if absent.
+- RoPE positions are identical in prefill and decode paths.
+- Q/K normalization, projection bias, and RoPE settings come from the checkpoint rather than hard-coded assumptions. Long-context RoPE scaling is a later extension.
+- Real-model tests receive a local checkpoint through `PICO_VLLM_QWEN_MODEL=/absolute/path` and skip if it is absent.
 
 ## Component boundaries
 
 | Component | Owns | Must not own |
 | --- | --- | --- |
 | `SamplingParams` | validation of generation settings | scheduling |
-| `Sequence` | one request's tokens, state, output | physical blocks |
-| `Scheduler` | waiting/running selection under budgets | model execution |
-| `BlockSpaceManager` | block allocation, sharing, refcounts | request priority |
-| `ModelRunner` | Qwen3 prefill/decode and logits | request lifecycle |
-| `LLMEngine` | orchestration and output events | HTTP protocol |
+| `Sequence` | one request's tokens, progress counters, block table | physical K/V storage |
+| `Scheduler` | waiting/running selection under budgets, preemption | model execution |
+| `BlockManager` | block allocation, prefix hashing, ref counts | request priority, tensors |
+| `PagedKVCache` | the K/V tensors, `write` / `read` by slot | deciding who owns a block |
+| `ModelRunner` | turning a batch into model inputs and a step `Context` | request lifecycle |
+| `LLMEngine` | one scheduler + model step, stop rules (EOS, `max_tokens`) | HTTP protocol |
 
-Use the state machine below and allow only the scheduler/engine to transition states:
-
-```text
-WAITING → RUNNING → FINISHED_STOPPED
-                  └→ FINISHED_LENGTH_CAPPED
-                  └→ FINISHED_ABORTED
-```
+A sequence moves `WAITING → RUNNING → FINISHED`. Preemption moves it from `RUNNING` back to `WAITING` and frees its blocks.
 
 ## How the components fit together
 
@@ -163,7 +196,8 @@ Who calls whom:
 | `ModelRunner.prepare_inputs` | reads `seq.block_table`, `num_cached_tokens`, ... | turn block ids into `slot_mapping` and a `Context` |
 | `ModelRunner.run` | `set_context` → `model(...)` → `reset_context` | expose the step's metadata to every layer |
 | `Attention.forward` | `get_context().kv_cache.write / read` | store this step's K/V and read the full context |
-| `LLMEngine.step` | `Scheduler.postprocess` | append sampled tokens, hash full blocks, finish/free seqs |
+| `LLMEngine.step` | `Scheduler.postprocess` | append sampled tokens, hash full blocks |
+| `LLMEngine.step` | `Scheduler.finish` | free the blocks of seqs that hit EOS or `max_tokens` |
 
 One step, end to end:
 
@@ -172,7 +206,8 @@ One step, end to end:
 2. ModelRunner.prepare_inputs  pos 0..4 of A → slots 12,13,14,15,32     (ids → slots)
 3. Attention, every layer      kv_cache.write(slots, k, v)              (values land in k_cache)
                                kv_cache.read(block_table=[3, 8], len=5)
-4. Scheduler.postprocess       append token; finished? → deallocate     (ids return to free queue;
+4. Scheduler.postprocess       append token, hash full blocks
+   LLMEngine / finish          EOS or max_tokens? → deallocate          (ids return to free queue;
                                                                           k_cache is left untouched)
 ```
 
@@ -189,12 +224,12 @@ block table:              [12, 7, 19]
 physical block id:          12    7    19
 ```
 
-`Sequence.block_table` maps logical blocks to physical blocks. Prompt-sharing sequences may reference the same blocks. If a sequence appends to a shared partial tail block, it first receives a copied block and changes only its own table: copy-on-write. This behavior needs focused tests; an end-to-end generation assertion is not enough.
+`Sequence.block_table` maps logical blocks to physical blocks. Sequences with the same prompt prefix share the physical blocks of that prefix. Only **full** blocks are hashed and shared, and a full block is never written again, so writes never land in a shared block and no copy-on-write is needed.
 
 Core invariants:
 
 - A physical block contains exactly `block_size` token positions.
-- `num_computed_tokens <= len(sequence.token_ids)`.
+- `num_cached_tokens + num_scheduled_tokens <= len(sequence.token_ids)`.
 - A block returns to the free queue only when its reference count becomes zero.
 - A scheduler step does not exceed `max_num_batched_tokens`.
 
@@ -210,19 +245,11 @@ For every milestone:
 ```bash
 uv run pytest tests/unit -q
 uv run pytest tests/integration -q
-uv run pytest -q
+PICO_VLLM_QWEN_MODEL=~/models/Qwen3-0.6B uv run pytest -q    # including real-model tests
 ```
 
-Use a seeded `torch.Generator` whenever a test samples randomly. Unit tests must never need CUDA, an internet connection, or downloaded weights. Real Qwen parity tests have both `integration` and `model` markers; CUDA-only tests additionally have `cuda`.
+Use a seeded `torch.Generator` whenever a test samples randomly. Unit tests must never need CUDA, an internet connection, or downloaded weights. Real Qwen parity tests have both `integration` and `model` markers; CUDA-only tests additionally have `cuda` and skip without a GPU.
 
-## Delivery plan and estimated size
+## License
 
-The roadmap deliberately starts with a compact Qwen3 core replica, then expands only after it works. It excludes model weights, dependencies, generated reports, and deployment infrastructure.
-
-| Scope | Production | Tests | Total |
-| --- | ---: | ---: | ---: |
-| Track A M0–M5: eager Qwen3 core | 1,500–2,500 LOC | 600–1,200 LOC | 2,100–3,700 LOC |
-| Track A M6: optional CUDA fast path | +300–800 LOC | +150–350 LOC | +450–1,150 LOC |
-| Track B: hardening, API, metrics, scale-out | +1,500–3,000 LOC | +1,500–2,500 LOC | +3,000–5,500 LOC |
-
-The immediate goal is Track A only. It is deliberately close to the compact reference-project scale, but still includes enough focused tests to make scheduler and block-manager bugs visible.
+[Apache-2.0](LICENSE)

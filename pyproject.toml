@@ -1,22 +1,31 @@
 [build-system]
-requires = ["hatchling>=1.25"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "pico-vllm"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A small, test-driven vLLM-inspired inference engine for Qwen3 models"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [
-  { name = "pico-vLLM contributors" },
+  { name = "hychen11" },
 ]
+keywords = ["llm", "inference", "vllm", "paged-attention", "kv-cache", "qwen3"]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Education",
+  "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
   "numpy>=2.2.6",
@@ -45,8 +54,17 @@ dev = [
   "ruff>=0.6",
 ]
 
+[project.urls]
+Homepage = "https://github.com/hychen11/pico-vllm"
+Repository = "https://github.com/hychen11/pico-vllm"
+Issues = "https://github.com/hychen11/pico-vllm/issues"
+Roadmap = "https://github.com/hychen11/pico-vllm/blob/main/ROADMAP.md"
+
 [project.scripts]
 pico-vllm = "pico_vllm.cli:main"
+
+[tool.hatch.version]
+path = "src/pico_vllm/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pico_vllm"]

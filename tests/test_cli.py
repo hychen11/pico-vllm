@@ -14,7 +14,7 @@ def test_cli_version(capsys: pytest.CaptureFixture[str]) -> None:
         parser.parse_args(["--version"])
 
     assert result.value.code == 0
-    assert capsys.readouterr().out.strip() == "pico-vllm 0.1.0"
+    assert capsys.readouterr().out.strip() == "pico-vllm 0.1.1"
 
 
 def test_module_cli_version(
@@ -26,4 +26,4 @@ def test_module_cli_version(
         main()
 
     assert result.value.code == 0
-    assert capsys.readouterr().out.strip() == "pico-vllm 0.1.0"
+    assert capsys.readouterr().out.strip() == "pico-vllm 0.1.1"
