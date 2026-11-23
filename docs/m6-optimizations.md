@@ -117,3 +117,5 @@ uv run python -m pico_vllm.benchmark --device cpu --dtype float32      # 第 0 �
 ### 6. CUDA Graph（待做）
 
 计划：对纯 decode 步骤，按几种固定 batch 大小录制 CUDA Graph。decode 分支改用 `flash_attn_with_kvcache`，因为它只依赖 GPU 张量 `cache_seqlens`，不依赖每步都会变的 Python 整数 `max_seqlen_k`。Triton kernel 需要支持 `slot == -1` 时跳过，用于 batch 补齐的空位。原理和例子见 [concepts/decode-attention-and-cuda-graph.md](concepts/decode-attention-and-cuda-graph.md)。
+
+分步实现清单见 [m6-step6-cuda-graph-guide.md](m6-step6-cuda-graph-guide.md)。
