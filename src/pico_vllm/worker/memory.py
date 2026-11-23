@@ -55,15 +55,12 @@ def profile_activation_bytes(
     """
     param = next(model.parameters())
     device, dtype = param.device, param.dtype
-    head_dim = getattr(hf_config, "head_dim", None) or (
-        hf_config.hidden_size // hf_config.num_attention_heads
-    )
     num_seqs, seq_len = warmup_shape(max_num_batched_tokens, max_model_len, max_num_seqs)
     blocks_per_seq = math.ceil(seq_len / block_size)
 
     cache = PagedKVCache(
         hf_config.num_hidden_layers, num_seqs * blocks_per_seq, block_size,
-        hf_config.num_key_value_heads, head_dim, dtype=dtype, device=device,
+        hf_config.num_key_value_heads, hf_config.head_dim, dtype=dtype, device=device,
     )
     runner = ModelRunner(model, cache, block_size, use_flash=use_flash)
     seqs = []

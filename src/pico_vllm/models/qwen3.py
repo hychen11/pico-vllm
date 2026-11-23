@@ -27,13 +27,11 @@ class Qwen3Attention(nn.Module):
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
         assert self.num_heads % self.num_kv_heads == 0
-        self.head_dim = getattr(config, "head_dim", None) or (
-                config.hidden_size // self.num_heads
-        )
+        self.head_dim = config.head_dim  # Qwen3Config always sets it (default 128)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim ** -0.5
-        bias = getattr(config, "attention_bias", False)
+        bias = config.attention_bias
 
         self.qkv_proj = QKVLinear(
             config.hidden_size, self.head_dim, self.num_heads, self.num_kv_heads, bias
@@ -128,7 +126,7 @@ class Qwen3ForCausalLM(nn.Module):
         super().__init__()
         self.model = Qwen3Model(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        if getattr(config, "tie_word_embeddings", False):
+        if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:

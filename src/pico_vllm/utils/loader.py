@@ -6,9 +6,13 @@ import os
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from glob import glob
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
+
+if TYPE_CHECKING:  # type annotations only
+    from pico_vllm.models.qwen3 import Qwen3ForCausalLM
 
 
 @contextmanager
@@ -34,7 +38,7 @@ def default_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor) -> N
 
 
 def load_weights(
-    model: nn.Module, weights: Iterable[tuple[str, torch.Tensor]]
+    model: Qwen3ForCausalLM, weights: Iterable[tuple[str, torch.Tensor]]
 ) -> set[str]:
     """Copy ``(checkpoint_name, tensor)`` pairs into ``model``.
 
@@ -43,7 +47,7 @@ def load_weights(
     parameter. Every other name must match a model parameter exactly.
     Returns the names of the model parameters that received data.
     """
-    mapping: dict = getattr(model, "packed_modules_mapping", {})
+    mapping = model.packed_modules_mapping
     # remove_duplicate=False keeps tied names such as ``lm_head.weight``.
     params = dict(model.named_parameters(remove_duplicate=False))
     loaded: set[str] = set()
@@ -65,7 +69,7 @@ def load_weights(
     return loaded
 
 
-def load_model(model: nn.Module, path: str) -> None:
+def load_model(model: Qwen3ForCausalLM, path: str) -> None:
     """Load every ``*.safetensors`` file in the checkpoint directory ``path``."""
     from safetensors import safe_open
 

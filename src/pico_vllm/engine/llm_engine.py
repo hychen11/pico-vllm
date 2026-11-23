@@ -46,9 +46,8 @@ def num_kv_blocks(config: Config, model: Qwen3ForCausalLM) -> int:
     Raises ``ValueError`` when not even one block fits.
     """
     hf = config.hf_config
-    head_dim = getattr(hf, "head_dim", None) or hf.hidden_size // hf.num_attention_heads
     block_bytes = kv_block_bytes(
-        hf.num_hidden_layers, config.kvcache_block_size, hf.num_key_value_heads, head_dim,
+        hf.num_hidden_layers, config.kvcache_block_size, hf.num_key_value_heads, hf.head_dim,
         config.dtype,
     )
     capacity = config.kvcache_capacity_bytes
@@ -119,13 +118,12 @@ class LLMEngine:
         model = build_model(config)
 
         hf = config.hf_config
-        head_dim = getattr(hf, "head_dim", None) or hf.hidden_size // hf.num_attention_heads
         dtype = config.dtype
         block_size = config.kvcache_block_size
         num_blocks = num_kv_blocks(config, model)
 
         kv_cache = PagedKVCache(
-            hf.num_hidden_layers, num_blocks, block_size, hf.num_key_value_heads, head_dim,
+            hf.num_hidden_layers, num_blocks, block_size, hf.num_key_value_heads, hf.head_dim,
             dtype=dtype, device=config.device,
         )
         Sequence.block_size = block_size

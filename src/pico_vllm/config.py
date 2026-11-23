@@ -10,7 +10,7 @@ import torch
 
 DEFAULT_CPU_KVCACHE_BYTES = 2 * 2**30
 
-_DTYPES = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}
+DTYPES = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}
 
 
 @dataclass
@@ -79,11 +79,11 @@ def resolve_dtype(dtype: str | torch.dtype, device: torch.device, hf_config: Any
         # transformers v5 stores it as ``dtype``; v4 as ``torch_dtype``.
         ckpt = getattr(hf_config, "dtype", None) or getattr(hf_config, "torch_dtype", None)
         if isinstance(ckpt, str):
-            ckpt = _DTYPES.get(ckpt)
+            ckpt = DTYPES.get(ckpt)
         return ckpt if isinstance(ckpt, torch.dtype) else torch.bfloat16
-    if dtype not in _DTYPES:
-        raise ValueError(f"dtype must be 'auto', {sorted(_DTYPES)} or a torch.dtype: {dtype!r}")
-    return _DTYPES[dtype]
+    if dtype not in DTYPES:
+        raise ValueError(f"dtype must be 'auto', {sorted(DTYPES)} or a torch.dtype: {dtype!r}")
+    return DTYPES[dtype]
 
 
 def resolve_use_flash(

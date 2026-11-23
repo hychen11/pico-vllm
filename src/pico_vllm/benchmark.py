@@ -28,7 +28,7 @@ from typing import Any
 
 import torch
 
-from pico_vllm.config import resolve_use_flash
+from pico_vllm.config import DTYPES, resolve_use_flash
 from pico_vllm.core.paged_kv_cache import PagedKVCache, num_blocks_from_capacity
 from pico_vllm.core.scheduler import Scheduler
 from pico_vllm.engine.llm_engine import LLMEngine
@@ -223,7 +223,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-input-len", type=int, default=512)
     parser.add_argument("--max-output-len", type=int, default=128)
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16", "float32"])
+    parser.add_argument("--dtype", default="bfloat16", choices=sorted(DTYPES))
     parser.add_argument("--kv-cache-gib", type=float, default=4.0)
     parser.add_argument("--block-size", type=int, default=256)
     parser.add_argument("--seed", type=int, default=0)
@@ -239,7 +239,7 @@ def main(argv: list[str] | None = None) -> None:
         max_input_len=args.max_input_len,
         output_len=args.max_output_len,
         device=args.device,
-        dtype=getattr(torch, args.dtype),
+        dtype=DTYPES[args.dtype],
         kvcache_capacity_bytes=int(args.kv_cache_gib * 2**30),
         block_size=args.block_size,
         seed=args.seed,
