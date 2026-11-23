@@ -120,7 +120,7 @@ uv run python -m pico_vllm.benchmark --device cuda:0 --no-triton   # eager KV wr
 
 | Document | Content |
 | --- | --- |
-| [ROADMAP.md](ROADMAP.md) | milestones M0–M10 and their tests |
+| [ROADMAP.md](ROADMAP.md) | milestones M0–M11 and their tests |
 | [docs/m6-optimizations.md](docs/m6-optimizations.md) | each M6 optimization: what improved, how, and by how much |
 | [docs/experiments/m6-triton-kv-store.md](docs/experiments/m6-triton-kv-store.md) | Triton KV-store experiment and environment |
 | [docs/design-vs-nano-vllm.md](docs/design-vs-nano-vllm.md) | M1–M5 design compared with nano-vllm |

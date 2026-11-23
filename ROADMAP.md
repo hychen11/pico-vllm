@@ -184,23 +184,54 @@ Add exhaustive state-machine, allocation-failure, abort, long-prompt, sampling-b
 
 **Commit:** `test: harden core engine invariants`
 
-### M8 — Better serving semantics
+### M8 — Tensor parallelism
+
+Moved ahead of the serving milestones: it changes the model layers and the runner, so it should land while M7's tests guard them and before the serving features build on top.
+
+**Files**
+
+```text
+src/pico_vllm/distributed.py
+src/pico_vllm/layers/{linear,embed_head}.py
+src/pico_vllm/models/qwen3.py
+src/pico_vllm/worker/model_runner.py
+src/pico_vllm/engine/llm_engine.py
+tests/unit/test_tp_layers.py
+tests/cuda/test_tensor_parallel.py
+```
+
+**Implement**
+
+- `Config.tensor_parallel_size` (default 1; must divide the attention-head and KV-head counts);
+- one process per GPU with `torch.distributed` and NCCL; rank 0 owns the scheduler and sampler, the other ranks only run the model; per-step inputs are broadcast from rank 0;
+- column-parallel QKV and gate/up projections and row-parallel `o_proj`/`down_proj` with an all-reduce; vocab-parallel embedding and LM head with a gather of logits on rank 0;
+- the loader shards each checkpoint tensor by rank, including the packed Q/K/V and gate/up layouts;
+- each rank keeps a KV cache for its own KV heads only; the block manager is unchanged and shared through rank 0;
+- `tensor_parallel_size == 1` keeps today's single-process path with no `torch.distributed` dependency.
+
+**Tests:** sharded linear/embedding layers reproduce the unsharded output on CPU (gloo, 2 processes); loader shard shapes; with 2 GPUs, TP=2 logits match TP=1 step by step (teacher forcing, as in M6 step 4). Skip GPU tests when fewer than 2 GPUs are visible.
+
+**Hardware note:** the dev machine pairs an RTX 5090 with an RTX 4060 Laptop GPU (8 GB, sm_89). That is enough to check TP correctness, but not to show a speedup: the slower card and PCIe/host-memory NCCL traffic bound each step, and the sm_120-only FlashAttention wheel does not run on the 4060, so TP runs there use eager attention.
+
+**Commit:** `feat: add tensor parallelism`
+
+### M9 — Better serving semantics
 
 Add top-k, top-p, stop-token sets, multiple completion candidates, streaming events, request ids, and fairer scheduling policy. Keep these additions separate from the baseline replica so their effects are measurable.
 
 **Commit:** `feat: extend serving semantics`
 
-### M9 — HTTP API
+### M10 — HTTP API
 
 Add `GET /health`, `POST /v1/completions`, then optional chat completions and server-sent event streaming using FastAPI. Invalid requests must not disturb active generation.
 
 **Commit:** `feat: expose openai-compatible api`
 
-### M10 — Observability and scale-out
+### M11 — Observability and scale-out
 
-Add metrics, reproducible benchmarks, trace/profiling hooks, tensor parallelism, and only then more advanced features such as quantization or LoRA.
+Add metrics, reproducible benchmarks, and trace/profiling hooks, and only then more advanced features such as quantization or LoRA. Tensor parallelism moved forward to M8.
 
-**Commit:** `perf: add observability and scale-out paths`
+**Commit:** `perf: add observability and profiling hooks`
 
 ## Size target
 
@@ -208,6 +239,6 @@ Add metrics, reproducible benchmarks, trace/profiling hooks, tensor parallelism,
 | --- | ---: | ---: | ---: |
 | Track A M0–M5, eager Qwen3 core | 1,500–2,500 LOC | 600–1,200 LOC | 2,100–3,700 LOC |
 | M6 CUDA fast path | +300–800 LOC | +150–350 LOC | +450–1,150 LOC |
-| Track B M7–M10 | +1,500–3,000 LOC | +1,500–2,500 LOC | +3,000–5,500 LOC |
+| Track B M7–M11 | +1,500–3,000 LOC | +1,500–2,500 LOC | +3,000–5,500 LOC |
 
 The core replica therefore stays near the reference project's scale. The larger estimates apply only after deliberately adding a robust test suite, network API, observability, and additional serving features.
