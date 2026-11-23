@@ -124,6 +124,8 @@ uv run python -m pico_vllm.benchmark --device cuda:0 --no-triton   # eager KV wr
 | [docs/m6-optimizations.md](docs/m6-optimizations.md) | each M6 optimization: what improved, how, and by how much |
 | [docs/experiments/m6-triton-kv-store.md](docs/experiments/m6-triton-kv-store.md) | Triton KV-store experiment and environment |
 | [docs/design-vs-nano-vllm.md](docs/design-vs-nano-vllm.md) | M1–M5 design compared with nano-vllm |
+| [docs/concepts/request-lifecycle-prefix-cache.md](docs/concepts/request-lifecycle-prefix-cache.md) | one request step by step: scheduling, prefix-cache hit, model inputs, attention (traced from real runs) |
+| [docs/concepts/attention-context.md](docs/concepts/attention-context.md) | the attention fields in `Context` (`cu_seqlens_q/k`, `max_seqlen_q/k`, `block_table`): why q holds only new tokens while KV covers the whole sequence |
 | [docs/concepts/decode-attention-and-cuda-graph.md](docs/concepts/decode-attention-and-cuda-graph.md) | decode FlashAttention inputs and why decode steps can be captured as CUDA graphs |
 
 ## Qwen3 forward path

@@ -1,9 +1,10 @@
 """Fixed throughput workload for M6 (CUDA fast path) before/after comparisons.
 
-Runs the real ``LLMEngine`` step loop on a randomly initialised Qwen3 with
-Qwen3-0.6B shapes, so no checkpoint download is needed; throughput depends only
-on shapes, not on weight values. Prompts are seeded random token ids and every
-request runs to exactly ``output_len`` tokens (``ignore_eos``).
+Runs the real ``LLMEngine`` step loop on a local Qwen3 checkpoint (``--model``,
+default ``$PICO_VLLM_QWEN_MODEL``). Without one it falls back to a randomly
+initialised Qwen3 with Qwen3-0.6B shapes: throughput depends only on shapes, and
+on Qwen3-0.6B both give the same numbers within 1%. Prompts are seeded random
+token ids and every request runs to exactly ``output_len`` tokens (``ignore_eos``).
 
 Two passes, each on a fresh scheduler + KV cache (so pass 2 gets no prefix-cache
 hits from pass 1):
@@ -12,13 +13,14 @@ hits from pass 1):
 2. ``max_tokens=output_len``: prefill + decode -> decode tok/s is
    ``num_seqs * (output_len - 1) / (t_full - t_prefill)``.
 
-    uv run python -m pico_vllm.benchmark            # defaults below, cuda + bf16
+    uv run python -m pico_vllm.benchmark --model ~/models/Qwen3-0.6B
     uv run python -m pico_vllm.benchmark --num-seqs 64 --max-output-len 256
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import time
 from dataclasses import dataclass
@@ -26,13 +28,14 @@ from typing import Any
 
 import torch
 
+from pico_vllm.config import resolve_use_flash
 from pico_vllm.core.paged_kv_cache import PagedKVCache, num_blocks_from_capacity
 from pico_vllm.core.scheduler import Scheduler
 from pico_vllm.engine.llm_engine import LLMEngine
 from pico_vllm.models.qwen3 import Qwen3ForCausalLM
 from pico_vllm.sampling_params import SamplingParams
 from pico_vllm.sequence import Sequence
-from pico_vllm.utils.loader import init_on
+from pico_vllm.utils.loader import init_on, load_model
 from pico_vllm.worker.model_runner import ModelRunner
 
 
@@ -99,6 +102,7 @@ def build_engine(
         max_num_seqs: int,
         max_num_batched_tokens: int,
         use_triton: bool | None = None,
+        use_flash: bool | None = None,
 ) -> LLMEngine:
     """Wrap an already-placed ``model`` in a fresh scheduler, KV cache and engine."""
     param = next(model.parameters())
@@ -113,7 +117,8 @@ def build_engine(
     )
     Sequence.block_size = block_size
     scheduler = Scheduler(max_num_seqs, max_num_batched_tokens, num_blocks, block_size)
-    runner = ModelRunner(model, kv_cache, block_size)
+    use_flash = resolve_use_flash(use_flash, param.device, param.dtype, block_size)
+    runner = ModelRunner(model, kv_cache, block_size, use_flash=use_flash)
     return LLMEngine(scheduler, runner, eos_token_id=None)
 
 
@@ -156,14 +161,25 @@ def run_benchmark(
         max_num_batched_tokens: int = 16384,
         seed: int = 0,
         hf_config: Any = None,
+        model_path: str | None = None,
         warmup: bool = True,
         use_triton: bool | None = None,
+        use_flash: bool | None = None,
 ) -> BenchmarkResult:
-    hf_config = hf_config if hf_config is not None else qwen3_0_6b_config()
+    """``model_path``: load that checkpoint (and its config); otherwise random weights
+    with ``hf_config`` (default: Qwen3-0.6B shapes)."""
+    if model_path is not None:
+        from transformers import AutoConfig
+
+        hf_config = AutoConfig.from_pretrained(model_path)
+    elif hf_config is None:
+        hf_config = qwen3_0_6b_config()
     torch.manual_seed(seed)
     dev = torch.device(device)
     with init_on(dev, dtype):
         model = Qwen3ForCausalLM(hf_config)
+    if model_path is not None:
+        load_model(model, model_path)
     model.eval()
 
     def fresh_engine() -> LLMEngine:
@@ -171,6 +187,7 @@ def run_benchmark(
             model, hf_config, kvcache_capacity_bytes=kvcache_capacity_bytes,
             block_size=block_size, max_num_seqs=max_num_seqs,
             max_num_batched_tokens=max_num_batched_tokens, use_triton=use_triton,
+            use_flash=use_flash,
         )
 
     prompts = make_prompts(num_seqs, min_input_len, max_input_len, hf_config.vocab_size, seed)
@@ -198,6 +215,9 @@ def run_benchmark(
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--model", default=os.environ.get("PICO_VLLM_QWEN_MODEL"),
+                        help="local Qwen3 checkpoint dir (default: $PICO_VLLM_QWEN_MODEL); "
+                             "without one, random weights with Qwen3-0.6B shapes")
     parser.add_argument("--num-seqs", type=int, default=32)
     parser.add_argument("--min-input-len", type=int, default=128)
     parser.add_argument("--max-input-len", type=int, default=512)
@@ -209,6 +229,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--no-triton", action="store_true",
                         help="force the eager KV-cache write (A/B against the Triton kernel)")
+    parser.add_argument("--no-flash", action="store_true",
+                        help="force the eager attention (A/B against FlashAttention 2)")
     args = parser.parse_args(argv)
 
     result = run_benchmark(
@@ -221,10 +243,14 @@ def main(argv: list[str] | None = None) -> None:
         kvcache_capacity_bytes=int(args.kv_cache_gib * 2**30),
         block_size=args.block_size,
         seed=args.seed,
+        model_path=os.path.expanduser(args.model) if args.model else None,
         use_triton=False if args.no_triton else None,
+        use_flash=False if args.no_flash else None,
     )
     name = torch.cuda.get_device_name(args.device) if args.device.startswith("cuda") else "cpu"
-    print(f"device={name} dtype={args.dtype} triton_kv_store={not args.no_triton}")
+    weights = args.model or "random (Qwen3-0.6B shapes)"
+    print(f"device={name} dtype={args.dtype} triton_kv_store={not args.no_triton} "
+          f"flash={not args.no_flash} weights={weights}")
     print(result)
 
 

@@ -82,7 +82,8 @@ class LLMEngine:
         scheduler = Scheduler(
             config.max_num_seqs, config.max_num_batched_tokens, num_blocks, block_size
         )
-        runner = ModelRunner(model, kv_cache, block_size)
+        # Config.__post_init__ already resolved use_flash to a bool.
+        runner = ModelRunner(model, kv_cache, block_size, use_flash=bool(config.use_flash))
         # Imported lazily: transformers is an optional dependency (``--extra model``).
         from transformers import AutoTokenizer
 

@@ -111,6 +111,11 @@ def test_prepare_inputs_prefill_with_prefix_hit(model: Qwen3ForCausalLM) -> None
     assert ctx.context_lens == [5, 6]
     assert ctx.block_tables == [[3, 8], [5, 9]]
     assert ctx.is_prefill and ctx.kv_cache is runner.kv_cache
+    # FA2 inputs: q holds only new tokens, KV covers the whole sequence.
+    assert ctx.cu_seqlens_k.tolist() == [0, 5, 11]
+    assert (ctx.max_seqlen_q, ctx.max_seqlen_k) == (5, 6)
+    assert ctx.block_table.tolist() == [[3, 8], [5, 9]]
+    assert ctx.cu_seqlens_q.dtype == ctx.cu_seqlens_k.dtype == ctx.block_table.dtype == torch.int32
 
 
 def test_prepare_inputs_decode(model: Qwen3ForCausalLM) -> None:
@@ -128,6 +133,21 @@ def test_prepare_inputs_decode(model: Qwen3ForCausalLM) -> None:
     assert ctx.cu_seqlens_q.tolist() == [0, 1, 2]
     assert ctx.context_lens == [6, 7]
     assert not ctx.is_prefill
+    assert ctx.cu_seqlens_k.tolist() == [0, 6, 13]
+    assert (ctx.max_seqlen_q, ctx.max_seqlen_k) == (1, 7)
+
+
+def test_prepare_inputs_pads_block_table(model: Qwen3ForCausalLM) -> None:
+    runner = make_runner(model)
+    a = Sequence(list(range(3)))
+    a.block_table, a.num_scheduled_tokens = [7], 3
+    b = Sequence(list(range(10)))
+    b.block_table, b.num_scheduled_tokens = [5, 9, 11], 10
+
+    _, _, ctx = runner.prepare_inputs([a, b], is_prefill=True)
+
+    assert ctx.block_table.tolist() == [[7, -1, -1], [5, 9, 11]]
+    assert ctx.block_tables == [[7], [5, 9, 11]]  # eager path keeps the ragged lists
 
 
 # --- run --------------------------------------------------------------------------

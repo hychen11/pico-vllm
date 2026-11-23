@@ -1,4 +1,5 @@
-"""Paged attention, eager PyTorch reference (no FlashAttention until M6).
+"""Paged attention: FlashAttention 2 when ``Context.use_flash`` (M6), else an eager
+PyTorch reference.
 
 TODO(M4): make ``Qwen3Attention`` (models/qwen3.py) call this module instead of
 its single-sequence ``_attention``; it needs a ``layer_idx`` to address the cache.
@@ -10,6 +11,14 @@ import torch
 from torch import nn
 
 from pico_vllm.utils.context import get_context
+
+# Optional: CPU installs and CI have no flash_attn.
+try:
+    from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache  # noqa: F401
+
+    HAS_FLASH_ATTN = True
+except ImportError:
+    HAS_FLASH_ATTN = False
 
 
 class Attention(nn.Module):
@@ -28,8 +37,10 @@ class Attention(nn.Module):
 
         With ``get_context()``:
         1. ``kv_cache.write(layer_idx, k, v, slot_mapping)``;
-        2. for each sequence i: take its query rows (``cu_seqlens_q``), ``kv_cache.read``
-           its full context, and run ``causal_attention``.
+        2. FA2: one ``flash_attn_varlen_func`` call over the whole batch, reading the
+           paged cache through ``block_table``; eager: for each sequence i, take its
+           query rows (``cu_seqlens_q``), ``kv_cache.read`` its full context, and run
+           ``causal_attention``.
         Returns ``[num_tokens, num_heads, D]``.
         """
         context = get_context()
@@ -39,6 +50,22 @@ class Attention(nn.Module):
             return causal_attention(q, k, v, self.scale)
         # Write first: this step's queries must also see this step's own K/V.
         kv_cache.write(self.layer_idx, k, v, context.slot_mapping)
+
+        if context.use_flash:
+            # Fields: docs/concepts/attention-context.md.
+            out: torch.Tensor = flash_attn_varlen_func(
+                q,
+                kv_cache.k_cache[self.layer_idx],  # whole paged pool of this layer
+                kv_cache.v_cache[self.layer_idx],
+                context.cu_seqlens_q,
+                context.cu_seqlens_k,
+                context.max_seqlen_q,
+                context.max_seqlen_k,
+                softmax_scale=self.scale,
+                causal=True,
+                block_table=context.block_table,
+            )
+            return out
         cu = context.cu_seqlens_q.tolist()
         outputs = []
         for i in range(len(context.block_tables)):

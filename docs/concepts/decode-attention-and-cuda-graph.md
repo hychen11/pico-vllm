@@ -54,7 +54,7 @@ GPU 上大致按"每条序列 × 每个 head"分工（长序列还会把 KV 再�
 4. 按 `block_table[1] = [3, 12]` 依次去 KV 池里取：块 3 的第 0–255 号位置，块 12 的第 0–43 号位置，共 300 个 key 和 value。
 5. 算 300 个注意力分数 → softmax → 对 300 个 value 加权求和 → 得到 128 维输出，写到 `out[1, 0, 0, :]`。
 
-"和前面所有 token 交互"发生在第 3、4 步：kernel **运行时**才读出长度和块号，再决定循环多少次、去哪里取数据。
+"和前面所有 token 交互"发生在第 3、4 步：kernel **运行时**才读出长度和块号，再决定循环多少次、去哪里取数据。B 的块 12 只写了 44 个 token，kernel 读到第 300 个就停，后面没用的位置不会读（半满的块和前缀缓存的区别见 [request-lifecycle-prefix-cache.md](request-lifecycle-prefix-cache.md) 的"常见疑问"）。
 
 `causal=True` 在 decode 时没有实际作用：只有 1 个 query，而且它就是最后一个位置，本来就能看到前面全部 token。
 
@@ -71,26 +71,12 @@ GPU 上大致按"每条序列 × 每个 head"分工（长序列还会把 KV 再�
 
 **变的只有内容，形状一个都没变。** 这就是"decode 的形状一样"的意思：形状只取决于 batch 大小（3）和 `block_table` 的宽度（4），和每条序列有多长无关。
 
-## 5. 对比 prefill：形状每步都变
+## 5. 对比 varlen：为什么 prefill 录不了
 
-假设同一步来了两个新 prompt，长度 120 和 700：
+`flash_attn_varlen_func`（字段含义见 [attention-context.md](attention-context.md)）有两个问题：
 
-```python
-flash_attn_varlen_func(
-    q,                      # [820, 16, 128]   ← 820 = 120 + 700，所有 token 拼在一起
-    k, v,                   # [820, 8, 128]
-    cu_seqlens_q=[0, 120, 820], cu_seqlens_k=[0, 120, 820],
-    max_seqlen_q=700, max_seqlen_k=700,   # ← Python 整数
-    causal=True,
-)
-```
-
-换一批 prompt（比如 50 和 64），`q` 就变成 `[114, 16, 128]`，`max_seqlen_q` 变成 64。
-
-- **形状**取决于本步 token 总数，每步都可能不同。
-- **`max_seqlen_q` / `max_seqlen_k` 是 Python 整数**。录 graph 时它会被当作常数写进 kernel 参数，以后回放还是旧值，结果就会出错。
-
-这里的 `causal=True` 是真正起作用的：一次有很多个 query，第 j 个 query 只能看第 0–j 个 token。
+- **q 的形状**是 `[本步 token 总数, ...]`。prefill 时每步的 token 总数都不同。
+- **`max_seqlen_q` / `max_seqlen_k` 是 Python 整数**。录 graph 时它们会被当作常数写进 kernel 参数，以后回放还是旧值，结果就会出错。decode 时 `max_seqlen_k` 每步都 +1，所以即使是 decode，用 varlen 也录不了。
 
 ## 6. CUDA Graph 为什么只要求"形状和地址不变"
 
@@ -99,8 +85,7 @@ CUDA Graph 把一整步要启动的所有 kernel（28 层的矩阵乘、norm、a
 所以 decode 的做法是：
 
 1. 启动时为每种 batch 大小分配**固定缓冲区**：`input_ids[bs]`、`positions[bs]`、`slot_mapping[bs]`、`context_lens[bs]`、`block_tables[bs, 最多块数]`、输出 `[bs, hidden]`，然后用它们各录一个 graph。
-2. 每个 decode 步：把本步的数据**拷进**这些缓冲区（地址不变，只改内容），然后回放对应的 graph。
-3. 实际条数不等于录制的 batch 大小时（比如有 3 条，用 bs=4 的 graph），多出的那一行是空位：`slot_mapping` 填 -1（KV 写入 kernel 看到 -1 就跳过），`context_lens` 填 0。这一行的输出直接丢掉。
+2. 每个 decode 步：把本步的数据**拷进**这些缓冲区（地址不变，只改内容），然后回放对应的 graph。实际条数小于录制的 batch 大小时怎么补齐，见第 8 节。
 
 `block_table` 的宽度要在录制时固定下来，通常取 `max_model_len / block_size`。FA2 也是按这个**宽度**（而不是每条序列的实际长度）来决定 KV 要切几段并行，所以实际长度变化不会影响录好的 graph。
 
@@ -148,6 +133,6 @@ batch 大小决定了 `q`、`cache_seqlens`、`block_table` 的第一维，所�
 
 ## 9. 对本项目的意义
 
-- 本项目用统一的 `prepare_inputs`：decode 只是"每条 q_len = 1"的特例，用 `flash_attn_varlen_func` 也能算对（见 [m6-optimizations.md](../m6-optimizations.md) 第 4 步），但它需要 Python 整数 `max_seqlen_k`，录不了 graph。
+- 本项目用统一的 `prepare_inputs`：decode 只是"每条 q_len = 1"的特例，M6 第 4 步用 `flash_attn_varlen_func` 统一处理，结果是对的，但录不了 graph（第 5 节）。
 - 做 CUDA Graph（M6 第 6 步）时，加一条"纯 decode 快速路径"：本步每条序列 q_len 都是 1，且条数不超过录制的最大 batch → 把数据拷进固定缓冲区，用 `flash_attn_with_kvcache` 并回放 graph；其他情况仍走统一的 varlen 路径。
-- 还需要做两处准备：Triton KV 写入 kernel 要支持 `slot == -1` 时跳过；Context 里的 `context_lens` 和 `block_tables` 要改成 int32 GPU 张量，`block_table` 的宽度固定。
+- 还需要做两处准备：Triton KV 写入 kernel 要支持 `slot == -1` 时跳过；`cache_seqlens` 要有一个 int32 GPU 张量（现在的 `context_lens` 是 Python list），`block_table` 的宽度要固定成 `max_model_len / block_size`（现在按本步最多块数补齐）。

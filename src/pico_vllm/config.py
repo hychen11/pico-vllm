@@ -28,6 +28,9 @@ class Config:
     # "auto": the checkpoint dtype on CUDA (bfloat16 if unset), float32 on CPU.
     # Otherwise "float32" / "bfloat16" / "float16" or a ``torch.dtype``.
     dtype: str | torch.dtype = "auto"
+    # FlashAttention 2 (M6). None: on whenever the setup supports it (see
+    # ``resolve_use_flash``); True: require it; False: force the eager attention.
+    use_flash: bool | None = None
     hf_config: Any = field(default=None, init=False)
 
     def __post_init__(self) -> None:
@@ -40,6 +43,9 @@ class Config:
         self.max_model_len = min(self.max_model_len, self.hf_config.max_position_embeddings)
         self.device = resolve_device(self.device)
         self.dtype = resolve_dtype(self.dtype, self.device, self.hf_config)
+        self.use_flash = resolve_use_flash(
+            self.use_flash, self.device, self.dtype, self.kvcache_block_size
+        )
 
 
 def resolve_device(device: str | torch.device) -> torch.device:
@@ -63,6 +69,29 @@ def resolve_dtype(dtype: str | torch.dtype, device: torch.device, hf_config: Any
     if dtype not in _DTYPES:
         raise ValueError(f"dtype must be 'auto', {sorted(_DTYPES)} or a torch.dtype: {dtype!r}")
     return _DTYPES[dtype]
+
+
+def resolve_use_flash(
+        use_flash: bool | None, device: torch.device, dtype: torch.dtype, block_size: int
+) -> bool:
+    """FA2 needs CUDA, fp16/bf16, an importable ``flash_attn``, and a paged-KV block
+    size that is a multiple of 256. ``None`` turns it on exactly when all hold."""
+    from pico_vllm.layers.attention import HAS_FLASH_ATTN
+
+    supported = (
+        torch.device(device).type == "cuda"
+        and dtype in (torch.float16, torch.bfloat16)
+        and HAS_FLASH_ATTN
+        and block_size % 256 == 0
+    )
+    if use_flash is None:
+        return supported
+    if use_flash and not supported:
+        raise ValueError(
+            "use_flash=True needs a CUDA device, float16/bfloat16, an importable "
+            f"flash_attn and block_size % 256 == 0 (got {device}, {dtype}, {block_size})"
+        )
+    return use_flash
 
 
 def get_rope_theta(hf_config: Any) -> float:

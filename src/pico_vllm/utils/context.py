@@ -38,14 +38,19 @@ class Context:
         positions:      0   1   2   3   4 |  4   5
         slot_mapping:  12  13  14  15  32 | 36  37    # block * 4 + pos % 4
 
-        cu_seqlens_q = [0, 5, 7]          # A = rows 0:5, B = rows 5:7
+        cu_seqlens_q = [0, 5, 7]          # q: only new tokens, A = rows 0:5, B = rows 5:7
         context_lens = [5, 6]             # KV to read: A a0..a4, B b0..b5
         block_tables = [[3, 8], [5, 9]]
+        cu_seqlens_k = [0, 5, 11]         # prefix sums of context_lens (KV = whole seq)
+        max_seqlen_q = 5, max_seqlen_k = 6
+        block_table  = [[3, 8], [5, 9]]   # int32, rows padded with -1
 
     The next (decode) step computes one token per sequence (a5, b6)::
 
         positions = [5, 6], slot_mapping = [33, 38]
-        cu_seqlens_q = [0, 1, 2], context_lens = [6, 7]
+        cu_seqlens_q = [0, 1, 2], context_lens = [6, 7], cu_seqlens_k = [0, 6, 13]
+
+    More detail: docs/concepts/attention-context.md.
     """
 
     is_prefill: bool = False
@@ -58,6 +63,13 @@ class Context:
     # Per seq: physical block ids (Sequence.block_table).
     block_tables: list[list[int]] = field(default_factory=list)
     kv_cache: PagedKVCache | None = None
+    # FA2 inputs (int32 tensors). cu_seqlens_k: [num_seqs + 1], prefix sums of context_lens.
+    cu_seqlens_k: torch.Tensor | None = None
+    max_seqlen_q: int = 0  # max query tokens of any seq in this step
+    max_seqlen_k: int = 0  # max(context_lens)
+    # [num_seqs, max_num_blocks]: block_tables padded with -1 (FA2 stops at seqlen_k).
+    block_table: torch.Tensor | None = None
+    use_flash: bool = False  # ModelRunner copies it from Config.use_flash
 
 
 _CONTEXT = Context()

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 import torch
 
@@ -44,3 +46,15 @@ def test_benchmark_cpu() -> None:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_benchmark_cuda() -> None:
     _run("cuda")
+
+
+@pytest.mark.cuda
+@pytest.mark.model
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_benchmark_real_weights() -> None:
+    path = os.environ.get("PICO_VLLM_QWEN_MODEL")
+    if not path:
+        pytest.skip("set PICO_VLLM_QWEN_MODEL to a local Qwen3 dir")
+    result = run_benchmark(num_seqs=4, min_input_len=16, max_input_len=64, output_len=8,
+                           device="cuda", model_path=path)
+    assert result.output_tokens == 4 * 8
