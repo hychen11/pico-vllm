@@ -77,7 +77,7 @@ outputs = llm.generate(
 print(outputs[0]["text"], outputs[0]["token_ids"])
 ```
 
-`LLM` accepts the `Config` fields as keyword arguments: `max_num_seqs`, `max_num_batched_tokens`, `max_model_len`, `kvcache_block_size`, `kvcache_capacity_bytes`, `device` (`"auto"`, `"cuda:0"`, `"cpu"`), and `dtype` (`"auto"`, `"bfloat16"`, `"float16"`, `"float32"`). With `"auto"`, the engine uses CUDA with the checkpoint dtype (or bf16) when a GPU is available, and CPU with fp32 otherwise.
+`LLM` accepts the `Config` fields as keyword arguments: `max_num_seqs`, `max_num_batched_tokens`, `max_model_len`, `kvcache_block_size`, `kvcache_capacity_bytes`, `gpu_memory_utilization`, `device` (`"auto"`, `"cuda:0"`, `"cpu"`), and `dtype` (`"auto"`, `"bfloat16"`, `"float16"`, `"float32"`). With `"auto"`, the engine uses CUDA with the checkpoint dtype (or bf16) when a GPU is available, and CPU with fp32 otherwise. On CUDA, leaving `kvcache_capacity_bytes` unset sizes the KV cache after a warm-up step so that the engine uses at most `gpu_memory_utilization` (default 0.9) of the GPU, counting memory held by other processes; on CPU it defaults to 2 GiB.
 
 Benchmark with a randomly initialized model of Qwen3-0.6B shape (no download needed):
 
@@ -126,6 +126,7 @@ uv run python -m pico_vllm.benchmark --device cuda:0 --no-triton   # eager KV wr
 | [docs/design-vs-nano-vllm.md](docs/design-vs-nano-vllm.md) | M1–M5 design compared with nano-vllm |
 | [docs/concepts/request-lifecycle-prefix-cache.md](docs/concepts/request-lifecycle-prefix-cache.md) | one request step by step: scheduling, prefix-cache hit, model inputs, attention (traced from real runs) |
 | [docs/concepts/attention-context.md](docs/concepts/attention-context.md) | the attention fields in `Context` (`cu_seqlens_q/k`, `max_seqlen_q/k`, `block_table`): why q holds only new tokens while KV covers the whole sequence |
+| [docs/concepts/kv-cache-sizing.md](docs/concepts/kv-cache-sizing.md) | how the KV cache is sized from GPU memory: the budget formula, the prefill + decode warm-up that measures the activation peak, and why the engine runs `gc.collect()` before loading weights |
 | [docs/concepts/decode-attention-and-cuda-graph.md](docs/concepts/decode-attention-and-cuda-graph.md) | decode FlashAttention inputs and why decode steps can be captured as CUDA graphs |
 
 ## Qwen3 forward path

@@ -11,18 +11,20 @@ plus stopping rules.
 
 from __future__ import annotations
 
+import gc
 from typing import Any
 
 import torch
 
-from pico_vllm.config import Config
-from pico_vllm.core.paged_kv_cache import PagedKVCache, num_blocks_from_capacity
+from pico_vllm.config import DEFAULT_CPU_KVCACHE_BYTES, Config
+from pico_vllm.core.paged_kv_cache import PagedKVCache, kv_block_bytes
 from pico_vllm.core.scheduler import Scheduler
 from pico_vllm.models.qwen3 import Qwen3ForCausalLM
 from pico_vllm.sampler import sample
 from pico_vllm.sampling_params import SamplingParams
 from pico_vllm.sequence import Sequence
 from pico_vllm.utils.loader import init_on, load_model
+from pico_vllm.worker.memory import num_blocks_from_gpu_memory, profile_activation_bytes
 from pico_vllm.worker.model_runner import ModelRunner
 
 
@@ -32,6 +34,50 @@ def build_model(config: Config) -> Qwen3ForCausalLM:
         model = Qwen3ForCausalLM(config.hf_config)
     load_model(model, config.model)  # copy_ casts checkpoint dtype/device as needed
     return model.eval()
+
+
+def num_kv_blocks(config: Config, model: Qwen3ForCausalLM) -> int:
+    """KV blocks for this engine.
+
+    - ``kvcache_capacity_bytes`` set: as many blocks as fit in it;
+    - otherwise on CUDA: warm up, then fill ``gpu_memory_utilization`` of the GPU
+      (``worker.memory``);
+    - otherwise (CPU): ``DEFAULT_CPU_KVCACHE_BYTES``.
+    Raises ``ValueError`` when not even one block fits.
+    """
+    hf = config.hf_config
+    head_dim = getattr(hf, "head_dim", None) or hf.hidden_size // hf.num_attention_heads
+    block_bytes = kv_block_bytes(
+        hf.num_hidden_layers, config.kvcache_block_size, hf.num_key_value_heads, head_dim,
+        config.dtype,
+    )
+    capacity = config.kvcache_capacity_bytes
+    if capacity is None and config.device.type == "cuda":
+        activation = profile_activation_bytes(
+            model, hf, block_size=config.kvcache_block_size,
+            max_num_batched_tokens=config.max_num_batched_tokens,
+            max_model_len=config.max_model_len, max_num_seqs=config.max_num_seqs,
+            use_flash=bool(config.use_flash),
+        )
+        num_blocks = num_blocks_from_gpu_memory(
+            config.device, activation, block_bytes, config.gpu_memory_utilization
+        )
+        free, total = torch.cuda.mem_get_info(config.device)
+        source = (
+            f"gpu_memory_utilization={config.gpu_memory_utilization} "
+            f"({(total - free) / 2**30:.2f} of {total / 2**30:.2f} GiB already in use, "
+            f"{activation / 2**30:.2f} GiB reserved for activations)"
+        )
+    else:
+        capacity = DEFAULT_CPU_KVCACHE_BYTES if capacity is None else capacity
+        num_blocks = capacity // block_bytes
+        source = f"kvcache_capacity_bytes={capacity}"
+    if num_blocks <= 0:
+        raise ValueError(
+            f"no KV-cache block ({block_bytes} bytes) fits with {source}; raise it, or "
+            "lower max_num_batched_tokens / max_num_seqs / kvcache_block_size"
+        )
+    return num_blocks
 
 
 class LLMEngine:
@@ -58,21 +104,25 @@ class LLMEngine:
         """Build every component for the local checkpoint ``config.model``.
 
         - ``build_model(config)``: weights on ``config.device`` in ``config.dtype``;
-        - ``PagedKVCache`` sized by ``num_blocks_from_capacity``, on the same device/dtype;
+        - ``PagedKVCache`` on the same device/dtype, sized by ``num_kv_blocks``;
         - ``Scheduler`` and ``PagedKVCache`` must share ``num_blocks`` and block size;
         - set ``Sequence.block_size = config.kvcache_block_size`` (class attribute!);
         - ``AutoTokenizer.from_pretrained(config.model)``; EOS id from the tokenizer.
         """
+        if config.device.type == "cuda":
+            # An earlier engine in this process may still be waiting for gc (its
+            # modules form reference cycles). Release it before loading weights:
+            # otherwise they land in its cached KV segment, which then can never be
+            # returned, and the auto-sized cache shrinks with every new engine.
+            gc.collect()
+            torch.cuda.empty_cache()
         model = build_model(config)
 
         hf = config.hf_config
         head_dim = getattr(hf, "head_dim", None) or hf.hidden_size // hf.num_attention_heads
         dtype = config.dtype
         block_size = config.kvcache_block_size
-        num_blocks = num_blocks_from_capacity(
-            config.kvcache_capacity_bytes, hf.num_hidden_layers, block_size,
-            hf.num_key_value_heads, head_dim, dtype,
-        )
+        num_blocks = num_kv_blocks(config, model)
 
         kv_cache = PagedKVCache(
             hf.num_hidden_layers, num_blocks, block_size, hf.num_key_value_heads, head_dim,

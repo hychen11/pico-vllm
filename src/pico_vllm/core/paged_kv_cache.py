@@ -74,6 +74,17 @@ class PagedKVCache:
         return k, v
 
 
+def kv_block_bytes(
+        num_layers: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_dim: int,
+        dtype: torch.dtype = torch.float32,
+) -> int:
+    """Bytes one KV block takes across K and V and all layers."""
+    return 2 * num_layers * block_size * num_kv_heads * head_dim * dtype.itemsize
+
+
 def num_blocks_from_capacity(
         capacity_bytes: int,
         num_layers: int,
@@ -84,7 +95,7 @@ def num_blocks_from_capacity(
 ) -> int:
     """How many KV blocks (K and V, all layers) fit in ``capacity_bytes``.
 
-    Dynamic sizing from free GPU memory is deferred to M6.
+    Used when ``Config.kvcache_capacity_bytes`` is set; otherwise CUDA engines size
+    the cache from free GPU memory (``worker.memory``).
     """
-    block_capacity = 2 * num_layers * block_size * num_kv_heads * head_dim * dtype.itemsize
-    return capacity_bytes // block_capacity
+    return capacity_bytes // kv_block_bytes(num_layers, block_size, num_kv_heads, head_dim, dtype)

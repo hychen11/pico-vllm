@@ -8,6 +8,8 @@ from typing import Any
 
 import torch
 
+DEFAULT_CPU_KVCACHE_BYTES = 2 * 2**30
+
 _DTYPES = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}
 
 
@@ -21,8 +23,13 @@ class Config:
     max_model_len: int = 4096
     kvcache_block_size: int = 256
     # Bytes for the whole paged KV cache (K and V, all layers); sizes num_blocks.
-    # Fixed until M6, which sizes the cache from free GPU memory instead.
-    kvcache_capacity_bytes: int = 2 * 2**30
+    # None: on CUDA, fill ``gpu_memory_utilization`` of the GPU after a warm-up
+    # (``worker.memory``); on CPU, ``DEFAULT_CPU_KVCACHE_BYTES``.
+    kvcache_capacity_bytes: int | None = None
+    # Fraction of the GPU's total memory this engine may use (weights, activations,
+    # KV cache; memory other processes hold counts against it too). Ignored when
+    # ``kvcache_capacity_bytes`` is set or on CPU.
+    gpu_memory_utilization: float = 0.9
     # "auto": "cuda" when available, else "cpu". Resolved to a ``torch.device``.
     device: str | torch.device = "auto"
     # "auto": the checkpoint dtype on CUDA (bfloat16 if unset), float32 on CPU.
@@ -34,6 +41,14 @@ class Config:
     hf_config: Any = field(default=None, init=False)
 
     def __post_init__(self) -> None:
+        if not 0.0 < self.gpu_memory_utilization <= 1.0:
+            raise ValueError(
+                f"gpu_memory_utilization must be in (0, 1]: {self.gpu_memory_utilization}"
+            )
+        if self.kvcache_capacity_bytes is not None and self.kvcache_capacity_bytes <= 0:
+            raise ValueError(
+                f"kvcache_capacity_bytes must be positive: {self.kvcache_capacity_bytes}"
+            )
         if not os.path.isdir(self.model):
             raise ValueError(f"model must be a local directory: {self.model!r}")
         # Imported lazily: transformers is an optional dependency (``--extra model``).

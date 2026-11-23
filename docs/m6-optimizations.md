@@ -13,7 +13,7 @@ M6（CUDA fast path）只做性能优化，不改变 M5 的输出语义。本文
 | 2 | GPU 上默认使用 bf16 | ✅ | 49021 | 274.3 | 1.59× / 1.0× | 112× / 4.4× |
 | 3 | Triton KV 写入 kernel | ✅ | 48861 | 272.0 | 1.0× / 1.0× | 112× / 4.4× |
 | 4 | FlashAttention 2（varlen + 分页 KV） | ✅ | 106869 | 2494 | 2.19× / 9.17× | 245× / 40.1× |
-| 5 | 按 GPU 空闲显存自动决定 KV block 数 | 待做 | 不影响吞吐，记录可用 block 数和最大并发 | | | |
+| 5 | 按 GPU 空闲显存自动决定 KV block 数 | ✅ | 不影响吞吐：KV cache 73 → 906 个 block（2.00 → 24.77 GiB，可缓存 18688 → 231936 个 token，12.4×） | | | |
 | 6 | CUDA Graph（decode） | 待做 | | | | |
 
 **瓶颈变化**：第 1–3 步 decode 一直停在约 275 tok/s，不随 GPU 算力（4060 上也是 274 tok/s）和数据类型变化。原因是 eager attention 对"每层 × 每条序列"做 Python 循环，decode 每步产生上千次 kernel 调用，GPU 大部分时间在等 CPU。第 4 步把 attention 换成每层一次 FA2 调用，decode 提升到约 2500 tok/s。decode 每步仍要由 CPU 逐个发起 28 层的全部 kernel，第 6 步（CUDA Graph）针对的就是这部分开销。
@@ -73,9 +73,46 @@ uv run python -m pico_vllm.benchmark --device cpu --dtype float32      # 第 0 �
 
 原始数据：prefill 106773 / 106867 / 106871，decode 2508.0 / 2506.2 / 2481.7（3 次运行，表中取后 2 次的平均）。同一时间 `--no-flash` 为 prefill 48890、decode 272.4。
 
-### 5. 按 GPU 空闲显存自动决定 KV block 数（待做）
+### 5. 按 GPU 空闲显存自动决定 KV block 数
 
-这一步不提升吞吐，而是让 KV cache 用满可用显存，提高同时容纳的序列数。记录指标：block 数、可缓存的 token 总数，以及和固定 `kvcache_capacity_bytes` 相比的变化。
+这一步不提升吞吐，而是让 KV cache 用满可用显存，提高同时容纳的序列数。计算逻辑、warmup 的每一步和启动前清理的原因，详见 [concepts/kv-cache-sizing.md](concepts/kv-cache-sizing.md)。
+
+- **怎么做的**：新增 `Config.gpu_memory_utilization`（默认 0.9），`kvcache_capacity_bytes` 默认改为 `None`。CUDA 上不传 `kvcache_capacity_bytes` 时，`worker/memory.py` 按和 nano-vllm 相同的公式计算：
+
+  ```text
+  KV 可用字节 = 总显存 × gpu_memory_utilization − 已用显存 − activation 峰值
+  block 数   = KV 可用字节 // 每个 block 的字节数（Qwen3-0.6B、bf16、block_size 256 时为 28 MiB）
+  ```
+
+  - 已用显存：warmup 之后的 `torch.cuda.mem_get_info`，包括本进程（CUDA context、权重）和 GPU 上其他进程占用的显存；
+  - activation 峰值：`profile_activation_bytes` 用 runner 真实地跑调度器可能产生的两种最大的步，记录这期间比起点多分配的显存峰值（`max_memory_allocated() - base`）：
+    1. 最大的 prefill 步：把一步的 token 上限塞满，即 `max_num_batched_tokens // max_model_len` 条 `max_model_len` 长的 prompt（默认 4 条 × 4096）；
+    2. 最大的 decode 步：`max_num_seqs` 条序列（默认 512）各算 1 个 token，每条的上下文都是 `max_model_len` 长。它们不另外分配 block，而是轮流共用第 1 步那几条 prompt 已经写好的 KV（decode 序列 i 用 prefill 序列 i % 4 的 block_table）。这几条 prompt 内容完全相同，真实运行时前缀缓存也会这样共享；每条重算自己的最后一个 token 并写回原位置，数值无所谓，只测显存；
+  - warmup 的 K/V 写进一个临时 cache。这个 cache 在重置峰值计数之前分配、测完就释放，所以不会被重复计入；
+  - 显式传了 `kvcache_capacity_bytes` 时仍按固定大小分配；CPU 上默认 2 GiB（`DEFAULT_CPU_KVCACHE_BYTES`）；
+  - 一个 block 都放不下时直接报错，报错信息里写明已用显存和 activation 预留量；
+  - CUDA 上加载权重之前先 `gc.collect()` 和 `torch.cuda.empty_cache()`。原因：同一进程里先删掉一个引擎再新建时，旧引擎的 KV cache 立即释放，但模型因为循环引用要等 gc；释放出的 KV 显存留在 PyTorch 的缓存里，新权重会被分配进去，这段显存之后无法归还，被 `mem_get_info` 算成"已用"。在 5090 上用默认参数连续创建 3 个引擎：不加这一步时 block 数依次为 906、884、884；加上之后每次都是 906。
+- **测试**：`tests/unit/test_kv_sizing.py`（公式、warmup 形状、三种来源的选择、配置校验）；`tests/cuda/test_kv_sizing_cuda.py`（临时 cache 被释放、自动分配后不超过上限、调低 utilization 得到更少的 block、真实模型能生成）。GPU 已被其他进程占用 40% 以上时，后几个测试会跳过。
+- **结果**：RTX 5090，真实 Qwen3-0.6B，默认参数（`max_num_batched_tokens=16384`、`max_num_seqs=512`、`max_model_len=4096`、block_size 256、bf16、FA2）：
+
+  | 配置 | block 数 | 可缓存 token 数 | KV cache 大小 | 建好后已用显存 |
+  | --- | ---: | ---: | ---: | ---: |
+  | 原来固定 2 GiB | 73 | 18688 | 2.00 GiB | 4.66 GiB |
+  | `gpu_memory_utilization=0.9`（默认） | 906 | 231936 | 24.77 GiB | 27.19 GiB |
+  | `gpu_memory_utilization=0.5` | 447 | 114432 | 12.22 GiB | 14.64 GiB |
+
+  - 可缓存的 token 数是原来的 12.4 倍。已用显存 27.19 GiB 加上 activation 峰值 1.02 GiB 为 28.21 GiB，正好等于 0.9 × 31.36 GiB；
+  - activation 峰值 1039 MiB，主要来自 decode 步 512 行 logits 的采样：词表 151936，logits 先是 bf16，再转成 fp32 并做 softmax，每份都有几百 MB。prefill 步只有 4 行 logits，峰值约 744 MiB；
+  - 吞吐不变，benchmark 仍用固定的 `--kv-cache-gib 4`，以便和前面几行对比。
+
+  同一张 5090 上 FA2 和 eager（`use_flash=False`）的 warmup 对比，util=0.9。耗时取进程内第二次运行，第一次含 kernel 编译，FA2 约 1.3 秒：
+
+  | attention | activation 峰值 | warmup：prefill 段 | warmup：decode 段 | block 数 |
+  | --- | ---: | ---: | ---: | ---: |
+  | FA2 | 1039 MiB | 0.21 s | 0.08 s | 906 |
+  | eager | 1472 MiB | 0.65 s | 1.59 s | 891 |
+
+  eager 的峰值更高，因为它为每条 prompt 生成完整的 4096 × 4096 打分矩阵。eager 的 decode 段慢 20 倍，原因和第 1–3 步 decode 吞吐只有约 275 tok/s 相同：每层 × 每条序列都要做一次 Python 循环，512 条 × 28 层就是 14336 次，每次读 4096 长的上下文并发起好几个小 kernel，时间主要花在 CPU 发起 kernel 上。
 
 ### 6. CUDA Graph（待做）
 
