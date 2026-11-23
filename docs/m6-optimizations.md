@@ -67,7 +67,7 @@ uv run python -m pico_vllm.benchmark --device cpu --dtype float32      # 第 0 �
 - **怎么做的**：每层用一次 `flash_attn_varlen_func`（带 `block_table`，直接读分页 KV cache）处理整个 batch，取代 eager 的逐条循环。prefill、前缀缓存命中、chunked prefill、decode 都走这一次调用。
   - `Config.use_flash` / `resolve_use_flash`：CUDA、fp16/bf16、能导入 `flash_attn`、`block_size % 256 == 0` 时自动启用，否则退回 eager。benchmark 用 `--no-flash` 做对比。
   - `prepare_inputs` 额外生成 `cu_seqlens_k`、`max_seqlen_q/k` 和用 -1 补齐的 int32 `block_table`，`cu_seqlens_q` 改为 int32。字段含义见 [concepts/attention-context.md](concepts/attention-context.md)。
-  - FA2 2.8.4 是针对 sm_120 自己编译的，wheel 备份在 `~/wheels/`。
+  - FA2 2.8.4 是针对 sm_120 自己编译的，wheel 备份在 `~/wheels/`。本项目默认运行在 5090 上，自动启用时不检查 GPU 架构；在其他 GPU（如 sm_89 的 4060）上要传 `use_flash=False`，否则第一步会报 `no kernel image is available`。
 - **为什么 decode 提升大得多**：eager 在 decode 时每层每条序列都要发起好几个很小的 kernel，32 条序列 × 28 层，CPU 发起开销占了绝大部分时间。FA2 每层只发起 1 个 kernel，这部分开销基本消失。prefill 本来就以矩阵乘为主，attention 的占比小，所以只快了约 2 倍。
 - **正确性**：`tests/cuda/test_flash_attention.py`。单层测试用一个混合 batch（全新 prompt、前缀命中、decode）比较 FA2 和 eager 的输出；模型测试让一个调度器同时驱动 eager 和 FA2 两个 runner，覆盖 chunked prefill、前缀命中和 decode，每步用 eager 的 token 继续生成（teacher forcing），逐步比较 logits。bf16 下生成的 token 不能直接比：真实 Qwen3-0.6B 上，两条路径在 top-2 logits 几乎相等（差 0 或 0.0625）的位置会选出不同的 token，之后的序列自然不同。
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import os
 
 import pytest
@@ -54,6 +55,9 @@ def test_profile_frees_its_temporary_cache() -> None:
     hf = tiny_hf_config()
     with init_on(torch.device("cuda"), torch.bfloat16):
         model = Qwen3ForCausalLM(hf).eval()
+    # Collect earlier tests' garbage first: the warm-up allocates enough Python
+    # objects to trigger gc itself, which would free it mid-test.
+    gc.collect()
     before = torch.cuda.memory_allocated()
     small = profile_activation_bytes(model, hf, block_size=16, max_num_batched_tokens=256,
                                      max_model_len=256, max_num_seqs=4, use_flash=False)
