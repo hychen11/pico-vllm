@@ -344,10 +344,30 @@ def test_full_round_trip_returns_to_empty() -> None:
     ],
 )
 def test_can_append_with_no_free_blocks(num_tokens: int, needs_block: bool) -> None:
-    bm = BlockManager(num_blocks=1, block_size=BS)
-    seq = make_seq(num_tokens)
-    bm._allocate_block()  # exhaust the pool
+    # A decode seq: its first num_tokens - 1 tokens have blocks, the last was just
+    # sampled and is about to run.
+    bm = BlockManager(num_blocks=8, block_size=BS)
+    seq = make_seq(num_tokens - 1)
+    prefill(bm, seq)
+    seq.append_token(99)
+    while bm.free_block_ids:  # exhaust the pool
+        bm._allocate_block()
     assert bm.can_append(seq) is not needs_block
+
+
+def test_block_size_one_allocates_a_block_every_decode_step() -> None:
+    # Regression: the old rule ``len(seq) % block_size == 1`` is never true for
+    # block_size 1, so decode never allocated and slot_mapping ran off the table.
+    bm = BlockManager(num_blocks=8, block_size=1)
+    seq = make_seq(3)
+    seq.block_size = 1  # instance attribute: this seq only
+    prefill(bm, seq)
+    for token in range(3):
+        seq.append_token(token)
+        assert bm.can_append(seq)
+        bm.may_append(seq)
+        assert len(seq.block_table) == seq.num_tokens
+        assert_invariants(bm)
 
 
 def test_can_append_with_free_block() -> None:

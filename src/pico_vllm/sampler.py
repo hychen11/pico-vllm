@@ -26,6 +26,9 @@ def sample(
     logits = logits.float()  # bf16/fp16 models: softmax and multinomial in fp32
     greedy = torch.argmax(logits, dim=-1)
     t = torch.where(temperatures == 0, 1, temperatures)
-    probs = torch.softmax(logits / t[:, None], dim=-1)
+    # Subtract each row's max before dividing: a tiny temperature then sends the
+    # other logits to -inf instead of the max to +inf (inf - inf = nan in softmax).
+    shifted = logits - logits.max(dim=-1, keepdim=True).values
+    probs = torch.softmax(shifted / t[:, None], dim=-1)
     sampled = torch.multinomial(probs, 1, generator=generator).squeeze(1)
     return torch.where(temperatures == 0, greedy, sampled).tolist()

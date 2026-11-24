@@ -45,7 +45,12 @@ class Scheduler:
         self.waiting.append(seq)
 
     def schedule(self) -> tuple[list[Sequence], bool]:
-        """Return (scheduled seqs, is_prefill). Try prefill first, else decode."""
+        """Return (scheduled seqs, is_prefill). Try prefill first, else decode.
+
+        Must not be called when ``is_finished()``. Every seq must fit the KV pool on
+        its own (``LLMEngine.add_request`` checks this); otherwise a seq that cannot
+        run even alone makes the step empty, which fails an assertion.
+        """
         seqs = self._schedule_prefill()
         if seqs:
             return seqs, True
@@ -137,3 +142,18 @@ class Scheduler:
         seq.status = SequenceStatus.FINISHED
         self.block_manager.deallocate(seq)
         self.running.remove(seq)
+
+    def abort(self, seq: Sequence) -> None:
+        """Drop seq wherever it is: waiting (incl. halfway through a chunked prefill
+        or after preemption) or running. Frees its blocks and marks it FINISHED.
+        Full blocks it already computed stay hashed, so later prefix hits still work.
+        A seq that is already finished is left alone."""
+        if seq.is_finished:
+            return
+        if seq.status == SequenceStatus.WAITING:
+            self.waiting.remove(seq)
+        else:
+            self.running.remove(seq)
+        seq.status = SequenceStatus.FINISHED
+        seq.num_scheduled_tokens = 0
+        self.block_manager.deallocate(seq)

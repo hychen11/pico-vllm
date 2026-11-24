@@ -155,9 +155,13 @@ class LLMEngine:
         """Queue one request. A ``str`` prompt is encoded with the tokenizer;
         a ``list[int]`` is used as token ids directly. Returns the new Sequence.
 
-        Raises ``ValueError`` if prompt + ``max_tokens`` exceeds ``max_model_len``."""
+        Raises ``ValueError`` if the prompt is empty, if prompt + ``max_tokens``
+        exceeds ``max_model_len``, or if the request could not fit the whole KV
+        pool even running alone (it would never be scheduled)."""
         if isinstance(prompt, str):
             prompt = self.tokenizer.encode(prompt)
+        if not prompt:
+            raise ValueError("prompt must contain at least one token")
         total = len(prompt) + sampling_params.max_tokens
         if self.max_model_len is not None and total > self.max_model_len:
             raise ValueError(
@@ -165,9 +169,24 @@ class LLMEngine:
                 f"({sampling_params.max_tokens}) = {total} exceeds max_model_len "
                 f"({self.max_model_len})"
             )
+        # The last sampled token never runs through the model, so at most
+        # total - 1 positions need KV.
+        block_manager = self.scheduler.block_manager
+        needed = -(-(total - 1) // block_manager.block_size)
+        if needed > block_manager.num_blocks:
+            raise ValueError(
+                f"prompt ({len(prompt)} tokens) + max_tokens "
+                f"({sampling_params.max_tokens}) needs {needed} KV blocks, but the "
+                f"cache has only {block_manager.num_blocks}"
+            )
         seq = Sequence(prompt, sampling_params)
         self.scheduler.add(seq)
         return seq
+
+    def abort_request(self, seq: Sequence) -> None:
+        """Stop generating for ``seq`` (as returned by ``add_request``) and free its
+        KV blocks. It is not returned by ``step()``. No-op if it already finished."""
+        self.scheduler.abort(seq)
 
     def step(self) -> list[Sequence]:
         """Run one scheduler + model step; return the seqs that finished in it.
@@ -178,6 +197,8 @@ class LLMEngine:
         Only check seqs that actually appended a token this step: a non-final
         chunked-prefill step appends nothing.
         """
+        if self.scheduler.is_finished():
+            return []
         seqs, is_prefill = self.scheduler.schedule()
         logits = self.model_runner.run(seqs, is_prefill)
         temperatures = torch.tensor(

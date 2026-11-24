@@ -79,3 +79,18 @@ def test_temperature_scales_logits(temperature: float) -> None:
     top = sum(sample(logits, torch.tensor([temperature]), g)[0] == 2 for _ in range(n)) / n
     expected = torch.softmax(logits[0] / temperature, dim=-1)[2].item()
     assert abs(top - expected) < 0.03
+
+
+@pytest.mark.parametrize("temperature", [1e-30, 1e-45])
+def test_extreme_temperature_does_not_produce_nan(temperature: float) -> None:
+    # Regression: logits / 1e-45 overflowed to inf and softmax gave nan, so
+    # multinomial raised. Shifting by the row max first keeps it finite.
+    logits = torch.randn(4, VOCAB, generator=gen()) * 30
+    out = sample(logits, torch.full((4,), temperature), gen(1))
+    assert out == logits.argmax(dim=-1).tolist()
+
+
+def test_extreme_temperature_splits_exact_ties() -> None:
+    logits = torch.tensor([[0.0, 5.0, 5.0, 1.0]]).repeat(200, 1)
+    out = sample(logits, torch.full((200,), 1e-45), gen(2))
+    assert set(out) == {1, 2}

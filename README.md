@@ -19,6 +19,7 @@ The milestone-by-milestone plan is in [ROADMAP.md](ROADMAP.md).
 | M4 | `PagedKVCache` and `ModelRunner` | done |
 | M5 | offline `LLM.generate` API | done |
 | M6 | CUDA fast path | done: GPU + bf16, Triton KV-store kernel, FlashAttention 2, KV cache sized from free GPU memory, CUDA Graph decode |
+| M7 | test coverage and correctness hardening | done: randomized scheduler / block-manager invariant tests, engine parity under pressure, abort, request validation; four bugs fixed ([docs/m7-hardening.md](docs/m7-hardening.md)) |
 
 Measured on an RTX 5090 with the fixed benchmark workload, M6 raises prefill from 437 to about 106,000 tok/s (243×) and decode from 62 to about 7,300 tok/s (117×) over the M5 CPU baseline; see [docs/m6-optimizations.md](docs/m6-optimizations.md) for each step.
 
@@ -30,6 +31,7 @@ Measured on an RTX 5090 with the fixed benchmark workload, M6 raises prefill fro
 - Prefix caching: full blocks are hashed (xxhash, chained) and shared between requests with the same prefix.
 - Chunked prefill: a prompt longer than the step's remaining token budget is split across steps.
 - Preemption: when blocks run out during decode, the newest sequence is freed and requeued.
+- Abort: `LLMEngine.abort_request(seq)` drops a waiting, running, preempted or half-prefilled request and frees its blocks.
 - Sampling: greedy (`temperature=0`) and temperature sampling, mixed freely within one batch; EOS, `max_tokens`, `ignore_eos`.
 - CUDA fast path: bf16 by default on GPU, Triton KV-store kernel; eager fallback on CPU.
 
@@ -122,6 +124,7 @@ uv run python -m pico_vllm.benchmark --device cuda:0 --no-triton   # eager KV wr
 | --- | --- |
 | [ROADMAP.md](ROADMAP.md) | milestones M0–M11 and their tests |
 | [docs/m6-optimizations.md](docs/m6-optimizations.md) | each M6 optimization: what improved, how, and by how much |
+| [docs/m7-hardening.md](docs/m7-hardening.md) | M7: the invariants the tests check, the bugs they found, and what each new test covers |
 | [docs/experiments/m6-triton-kv-store.md](docs/experiments/m6-triton-kv-store.md) | Triton KV-store experiment and environment |
 | [docs/design-vs-nano-vllm.md](docs/design-vs-nano-vllm.md) | M1–M5 design compared with nano-vllm |
 | [docs/concepts/request-lifecycle-prefix-cache.md](docs/concepts/request-lifecycle-prefix-cache.md) | one request step by step: scheduling, prefix-cache hit, model inputs, attention (traced from real runs) |

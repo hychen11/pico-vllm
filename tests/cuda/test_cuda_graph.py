@@ -4,7 +4,8 @@ One scheduler feeds two runners with their own KV caches: one replays captured
 graphs for decode steps, the other runs the model directly. Both see the same
 batches and the plain runner's greedy tokens (teacher forcing), so every step's
 logits are comparable. Sequences finish at different steps, so decode batch sizes
-change and need padding.
+change and need padding; one joins mid-decode, and two cross a block boundary while
+decoding.
 """
 
 from __future__ import annotations
@@ -89,21 +90,33 @@ def test_graph_decode_matches_plain_decode(monkeypatch: pytest.MonkeyPatch) -> N
     scheduler = Scheduler(max_num_seqs=6, max_num_batched_tokens=2048,
                           num_blocks=num_blocks, block_size=BS)
     g = torch.Generator().manual_seed(1)
-    lengths = [300, 37, 5, 260, 90, 12]  # some cross a block boundary while decoding
+    # 250 crosses into its second block (position 256) at decode step 7, so the
+    # replayed block_table gains a column mid-run.
+    lengths = [300, 37, 5, 250, 90, 12]
     seqs_all = [Sequence(torch.randint(0, vocab, (n,), generator=g).tolist()) for n in lengths]
     for s in seqs_all:
         scheduler.add(s)
+    # Joins mid-decode: one prefill step, then it decodes alongside the others (and
+    # crosses 256 two steps later).
+    late = Sequence(torch.randint(0, vocab, (254,), generator=g).tolist())
     # Finish seqs one by one: decode batch sizes go 6, 5 (padded to 6), 4, 3 (to 4), ...
-    finish_at = {3: seqs_all[0], 5: seqs_all[1], 7: seqs_all[2], 9: seqs_all[3], 11: seqs_all[4]}
-    for step in range(14):
+    finish_at = {3: seqs_all[0], 5: seqs_all[1], 7: seqs_all[2], 9: seqs_all[3], 11: seqs_all[4],
+                 13: late}  # then seqs_all[5] decodes alone: bs 1
+    replays_with_late = 0
+    for step in range(20):
+        if step == 6:
+            scheduler.add(late)
         if step in finish_at and not finish_at[step].is_finished:
             scheduler.finish(finish_at[step])
         if scheduler.is_finished():
             break
         seqs, is_prefill = scheduler.schedule()
+        replays_with_late += not is_prefill and late in seqs
         ref = plain.run(seqs, is_prefill)
         out = graphed.run(seqs, is_prefill)
         torch.testing.assert_close(out.float(), ref.float(), atol=2e-2, rtol=2e-2)
         scheduler.postprocess(seqs, ref.argmax(-1).tolist())  # teacher forcing
 
     assert set(replayed) >= {6, 5, 4, 3, 2, 1}  # e.g. 3 replays bs=4 with one padding row
+    assert seqs_all[3].num_tokens > BS and late.num_tokens > BS  # both crossed a block
+    assert replays_with_late >= 5

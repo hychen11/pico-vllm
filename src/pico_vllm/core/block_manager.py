@@ -150,11 +150,13 @@ class BlockManager:
         seq.block_table.clear()
 
     def can_append(self, seq: Sequence) -> bool:
-        # only append on first token
-        return len(self.free_block_ids) >= (len(seq)%self.block_size==1)
+        # A decode step computes the token at position len(seq) - 1. It needs a new
+        # block only when that position starts one, i.e. the table is one block short.
+        # (Not ``len(seq) % block_size == 1``: that is never true for block_size 1.)
+        return len(self.free_block_ids) >= (len(seq.block_table) < seq.num_blocks)
 
     def may_append(self, seq: Sequence) -> None:
-        if len(seq)%self.block_size==1:
+        if len(seq.block_table) < seq.num_blocks:
             block_id = self._allocate_block()
             seq.block_table.append(block_id)
 
