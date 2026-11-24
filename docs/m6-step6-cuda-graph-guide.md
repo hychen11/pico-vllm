@@ -42,6 +42,16 @@ uv run python -m pico_vllm.benchmark --device cuda:0 --model ~/models/Qwen3-0.6B
 
 记下 prefill / decode 两个数，后面每一步都和它比。
 
+**实测基线**（2026-11-23，main `7c69983`，5090 空闲，`uv run pytest -q` 209 passed）：
+
+| 轮次 | prefill（tok/s） | decode（tok/s） | 总计（tok/s） |
+| --- | ---: | ---: | ---: |
+| 1 | 105667 | 2455 | 8426 |
+| 2 | 106680 | 2420 | 8315 |
+| 平均 | 106173 | 2437 | 8371 |
+
+和总表第 4 行（106869 / 2494）的差别在 2.5% 以内，属于正常波动。
+
 ## 第 1 步：Triton kernel 跳过 `slot == -1`
 
 **为什么**：graph 的 batch 是固定档位（比如实际 3 条，用 bs = 4 的 graph），多出来的空位行也会经过 KV 写入。空位的 `slot_mapping` 填 -1，kernel 必须什么都不写，否则会写坏别人的 KV。
@@ -82,6 +92,8 @@ uv run python -m pico_vllm.benchmark --device cuda:0 --model ~/models/Qwen3-0.6B
 
 - `uv run pytest tests/cuda/test_flash_attention.py`：`test_model_steps_match_eager` 已经覆盖 decode 步并和 eager 对比，应仍然通过。
 - 跑一次 benchmark：decode 应从约 2494 到约 2700。提升不大是正常的，主要瓶颈还是 CPU 发起 kernel，这一步只是为录 graph 铺路。
+
+**实测**（2026-11-23，5090）：prefill 105869 / 106642，平均 106256 tok/s（不变）；decode 2716 / 2748，平均 2732 tok/s，比基线 2437 提升 1.12×。
 
 ## 第 4 步：录制 graph（`ModelRunner.capture_cudagraphs`）
 
@@ -169,6 +181,10 @@ uv run python -m pico_vllm.benchmark --device cuda:0 --model ~/models/Qwen3-0.6B
 - 录制耗时（engine 启动多花了多久，档位数 × 每档）。
 - graph 显存池大小（录制前后 `torch.cuda.memory_allocated` / `memory_reserved` 的差）。
 - 只换 `flash_attn_with_kvcache`（第 3 步）和加上 graph（第 5 步）各贡献多少。
+
+**实测**（2026-11-24，5090）：graph decode 7278 / 7293，平均 7286 tok/s；`--no-cuda-graph` 2710 / 2724，平均 2717 tok/s；prefill 约 106k 不变。录制 36 个档位约 0.8 s，显存池 60 MiB。详细结果已写入 [m6-optimizations.md](m6-optimizations.md#6-cuda-graphdecode)。
+
+**和本指南的差异**：实际实现没有把档位上限设为 512，也没有 `_fits_graph` 回退：档位一定包含 `max_num_seqs`，`add_request` 拒绝超过 `max_model_len` 的请求，所以每个 decode 步都装得下，`run` 只看 `self.graphs` 是否为空。
 
 写进 `docs/m6-optimizations.md`：总表第 6 行填数、状态改 ✅；"### 6. CUDA Graph（待做）"一节改写成实际做法和结果；`docs/design-vs-nano-vllm.md` 对应行同步更新。提交信息可以用 `perf: replay decode steps from cuda graphs`。
 

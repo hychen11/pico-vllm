@@ -14,14 +14,14 @@ M6（CUDA fast path）只做性能优化，不改变 M5 的输出语义。本文
 | 3 | Triton KV 写入 kernel | ✅ | 48861 | 272.0 | 1.0× / 1.0× | 112× / 4.4× |
 | 4 | FlashAttention 2（varlen + 分页 KV） | ✅ | 106869 | 2494 | 2.19× / 9.17× | 245× / 40.1× |
 | 5 | 按 GPU 空闲显存自动决定 KV block 数 | ✅ | 不影响吞吐：KV cache 73 → 906 个 block（2.00 → 24.77 GiB，可缓存 18688 → 231936 个 token，12.4×） | | | |
-| 6 | CUDA Graph（decode） | 待做 | | | | |
+| 6 | CUDA Graph（decode） | ✅ | 106317 | 7286 | 0.99× / 2.92× | 243× / 117× |
 
-**瓶颈变化**：第 1–3 步 decode 一直停在约 275 tok/s，不随 GPU 算力（4060 上也是 274 tok/s）和数据类型变化。原因是 eager attention 对"每层 × 每条序列"做 Python 循环，decode 每步产生上千次 kernel 调用，GPU 大部分时间在等 CPU。第 4 步把 attention 换成每层一次 FA2 调用，decode 提升到约 2500 tok/s。decode 每步仍要由 CPU 逐个发起 28 层的全部 kernel，第 6 步（CUDA Graph）针对的就是这部分开销。
+**瓶颈变化**：第 1–3 步 decode 一直停在约 275 tok/s，不随 GPU 算力（4060 上也是 274 tok/s）和数据类型变化。原因是 eager attention 对"每层 × 每条序列"做 Python 循环，decode 每步产生上千次 kernel 调用，GPU 大部分时间在等 CPU。第 4 步把 attention 换成每层一次 FA2 调用，decode 提升到约 2500 tok/s。decode 每步仍要由 CPU 逐个发起 28 层的全部 kernel，第 6 步（CUDA Graph）针对的就是这部分开销。第 6 步把整个 decode 步录成 CUDA Graph，每步只回放一次，decode 提升到约 7300 tok/s。
 
 ## 测量方法
 
 ```bash
-uv run python -m pico_vllm.benchmark --device cuda:0 --model ~/models/Qwen3-0.6B [--dtype float32] [--no-triton] [--no-flash]
+uv run python -m pico_vllm.benchmark --device cuda:0 --model ~/models/Qwen3-0.6B [--dtype float32] [--no-triton] [--no-flash] [--no-cuda-graph]
 uv run python -m pico_vllm.benchmark --device cpu --dtype float32      # 第 0 行
 ```
 
@@ -114,8 +114,18 @@ uv run python -m pico_vllm.benchmark --device cpu --dtype float32      # 第 0 �
 
   eager 的峰值更高，因为它为每条 prompt 生成完整的 4096 × 4096 打分矩阵。eager 的 decode 段慢 20 倍，原因和第 1–3 步 decode 吞吐只有约 275 tok/s 相同：每层 × 每条序列都要做一次 Python 循环，512 条 × 28 层就是 14336 次，每次读 4096 长的上下文并发起好几个小 kernel，时间主要花在 CPU 发起 kernel 上。
 
-### 6. CUDA Graph（待做）
 
-计划：对纯 decode 步骤，按几种固定 batch 大小录制 CUDA Graph。decode 分支改用 `flash_attn_with_kvcache`，因为它只依赖 GPU 张量 `cache_seqlens`，不依赖每步都会变的 Python 整数 `max_seqlen_k`。Triton kernel 需要支持 `slot == -1` 时跳过，用于 batch 补齐的空位。原理和例子见 [concepts/decode-attention-and-cuda-graph.md](concepts/decode-attention-and-cuda-graph.md)。
+### 6. CUDA Graph（decode）
 
-分步实现清单见 [m6-step6-cuda-graph-guide.md](m6-step6-cuda-graph-guide.md)。
+- **提升了什么**：decode 2.92×（2494 → 7286 tok/s），prefill 不变。和同一时间、同一代码的 `--no-cuda-graph` 比，decode 是 2.68×（2717 → 7286）；benchmark 的 decode 段从 1.49 s 降到 0.56 s，平均每步从约 11.7 ms 降到约 4.4 ms。
+- **怎么做的**：纯 decode 步不再由 CPU 逐个发起 28 层的 kernel，而是启动时把一整步录成 CUDA Graph，之后每步只把输入拷进固定缓冲区再回放一次。原理见 [concepts/decode-attention-and-cuda-graph.md](concepts/decode-attention-and-cuda-graph.md)，分步清单见 [m6-step6-cuda-graph-guide.md](m6-step6-cuda-graph-guide.md)。
+  1. `kernels/kv_store.py`：Triton kernel 遇到 `slot == -1` 直接返回。graph 的 batch 是固定档位，补齐的空位行 slot 为 -1，不能写 KV。eager 写入会把 -1 当成 Python 负索引，所以录 graph 要求 Triton 写入。
+  2. `layers/attention.py`：decode 改用 `flash_attn_with_kvcache`。它只依赖 GPU 张量 `cache_seqlens`（Context 新增字段），不依赖 varlen 每步都在变的 Python 整数 `max_seqlen_k`，所以能录。prefill 仍用 varlen。单这一步 decode 2437 → 2732 tok/s（1.12×，见指南第 3 步的实测）。
+  3. `ModelRunner.capture_cudagraphs`：档位为 1、2、4、8、16、32、48…，并且一定包含 `max_num_seqs` 本身（默认 512，共 36 个 graph）。输入输出都放在按最大档位分配一次的固定缓冲区里，`block_table` 宽度为 `ceil(max_model_len / block_size)`。先把每个档位真跑一遍（预热：cuBLAS workspace、Triton 编译等只能发生在录制之外），再从大到小录制，所有 graph 共用一个显存池。
+  4. `ModelRunner._replay`：选不小于实际条数 n 的最小档位；先把 `slot_mapping` 重置为 -1、`cache_seqlens` 置 0、`block_table` 置 -1，再拷入本步的前 n 行，回放后取 `outputs[:n]`。重置是为了防止上一步留在空位行的旧值写坏别的序列的 KV。`compute_logits` 和采样留在 graph 外面。
+  5. 接线：`Config.enforce_eager`（默认 False，和 vLLM / nano-vllm 同名）；`LLMEngine.from_config` 在分配 KV cache **之后**录制，graph 显存池从 `gpu_memory_utilization` 留下的余量里出。`add_request` 拒绝 prompt + `max_tokens` 超过 `max_model_len` 的请求，加上档位包含 `max_num_seqs`，每个 decode 步都一定有 graph 可用，不需要 nano-vllm 那种"超过 512 条回退 eager"的分支；`run` 只看是否录过 graph（`self.graphs` 非空）。benchmark 新增 `--no-cuda-graph`。
+- **为什么还没到 GPU 上限**：每步仍有 graph 外的 CPU 工作：调度、`prepare_inputs` 用 Python list 构造输入再 `torch.tensor` 拷到 GPU、拷进缓冲区的几次小拷贝、`compute_logits` 和采样。nano-vllm 在这部分用 pinned memory + `non_blocking=True`，可作为后续优化。
+- **代价**：默认参数下录制 36 个 graph 约 0.8 s（进程内第一次约 1.0 s），engine 启动从 0.82 s 变为 1.64 s。graph 显存池让 PyTorch 的 `memory_reserved` 多 60 MiB，固定缓冲区约 1 MiB。进程内第一次录制时 GPU 已用显存多 322 MiB，第二次只多 60 MiB，多出的部分不在 PyTorch 分配器里，应是 CUDA 库的一次性开销。都在 `gpu_memory_utilization` 留下的余量之内，KV block 数不受影响（`enforce_eager` 开和关都是 897 个）。
+- **正确性**：`tests/cuda/test_cuda_graph.py`。`test_kv_store_skips_slot_minus_one` 检查 -1 行不写任何东西；`test_graph_decode_matches_plain_decode` 让一个调度器同时驱动录 graph 和不录 graph 的两个 FA2 runner，teacher forcing 逐步比较 logits，序列逐条结束，覆盖 bs 6、5（补到 6）、4、3（补到 4）、2、1。用真实 Qwen3-0.6B 跑 `LLM.generate`（3 条 prompt，各 32 个 token，greedy）：2 条和 `enforce_eager=True` 完全相同；第 3 条在第 8 个 token 分叉，那个位置 top-2 logits 都是 15.8125（完全相等），是 bf16 下平票被打破的方向不同（graph 把 3 条补成 bs = 4，矩阵乘选的 kernel 不同），和第 4 步 FA2 vs eager 的情况一样，不是错误。
+
+原始数据（2026-11-24，5090 空闲，`uv run pytest -q` 212 passed）：graph prefill 106251 / 106385、decode 7278 / 7293；`--no-cuda-graph` prefill 106765 / 106804、decode 2710 / 2724。

@@ -78,6 +78,30 @@ GPU 上大致按"每条序列 × 每个 head"分工（长序列还会把 KV 再�
 - **q 的形状**是 `[本步 token 总数, ...]`。prefill 时每步的 token 总数都不同。
 - **`max_seqlen_q` / `max_seqlen_k` 是 Python 整数**。录 graph 时它们会被当作常数写进 kernel 参数，以后回放还是旧值，结果就会出错。decode 时 `max_seqlen_k` 每步都 +1，所以即使是 decode，用 varlen 也录不了。
 
+### 两个函数的张量布局
+
+两个函数都是"输入什么布局，输出就是什么布局"，区别在于 query 怎么排：
+
+| | `flash_attn_varlen_func` | `flash_attn_with_kvcache` |
+| --- | --- | --- |
+| `q` | `[total_tokens, num_heads, D]`，3 维，所有序列的 token 首尾相接 | `[batch, seqlen_q, num_heads, D]`，4 维，每条序列一行 |
+| 输出 | `[total_tokens, num_heads, D]` | `[batch, seqlen_q, num_heads, D]` |
+| 每条的 query 数 | 可以不同，用 `cu_seqlens_q` 切分 | 必须相同，都是 `seqlen_q` |
+| 最长的 query / KV 有多长 | 看不出来，要传 `max_seqlen_q` / `max_seqlen_k`（启动前用来定 grid 大小和 KV 切几段） | 从形状得出：`q.shape[1]`，以及 `block_table` 宽度 × `block_size` |
+| KV 长度 | `cu_seqlens_k`（前缀和） | `cache_seqlens`（每条的长度） |
+| 本项目用在 | prefill（含前缀缓存命中、分块 prefill） | decode |
+
+本项目模型内部的布局是 `[num_tokens, num_heads, D]`，和 varlen 一样，所以 prefill 直接传、直接返回。decode 每条只有 1 个 token，`num_tokens == num_seqs`，和 `with_kvcache` 的布局只差中间长度为 1 的一维，所以 `Attention.forward` 的 decode 分支是：
+
+```python
+out = flash_attn_with_kvcache(q.unsqueeze(1), ...)  # [num_seqs, H, D] -> [num_seqs, 1, H, D]
+return out.squeeze(1)                               # [num_seqs, 1, H, D] -> [num_seqs, H, D]
+```
+
+`unsqueeze` / `squeeze` 只改变看数据的方式，不拷贝。这样不管走哪条路径，`Attention.forward` 都返回 `[num_tokens, num_heads, D]`，上层不用关心。注意要写 `squeeze(1)` 而不是 `squeeze()`：batch 只有 1 条时，后者会把 batch 维也删掉。
+
+**普通 decode 的 `seqlen_q` 永远是 1**，所以这一维只是为了满足接口形状。它大于 1 的情况是**投机解码**（speculative decoding，包括 MTP）：先由草稿模型或 MTP 头一次猜出 k 个 token，再让主模型用一步同时验证。这时每条序列要算 k + 1 个 query，`q` 就是 `[batch, k + 1, H, D]`，`causal=True` 也开始起作用：mask 对齐在右下角，第 j 个猜测 token 只能看到它前面的 token。只要每条序列的 k 相同，形状依然固定，仍然可以录 CUDA Graph。本项目目前没有投机解码，所以始终是 1。
+
 ## 6. CUDA Graph 为什么只要求"形状和地址不变"
 
 CUDA Graph 把一整步要启动的所有 kernel（28 层的矩阵乘、norm、attention 等等）**录制一次**。之后每步只需要一次"回放"，省掉 CPU 逐个发起几千个 kernel 的开销。录制时，每个 kernel 的输入地址、张量形状、整数参数都被固定下来；回放时只有**显存里的内容**可以变。

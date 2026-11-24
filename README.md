@@ -18,9 +18,9 @@ The milestone-by-milestone plan is in [ROADMAP.md](ROADMAP.md).
 | M3 | native Qwen3 model and safetensors loader | done |
 | M4 | `PagedKVCache` and `ModelRunner` | done |
 | M5 | offline `LLM.generate` API | done |
-| M6 | CUDA fast path | in progress: GPU + bf16 and the Triton KV-store kernel are done; FlashAttention, automatic KV sizing, and CUDA Graph are next |
+| M6 | CUDA fast path | done: GPU + bf16, Triton KV-store kernel, FlashAttention 2, KV cache sized from free GPU memory, CUDA Graph decode |
 
-Measured on an RTX 5090 with the fixed benchmark workload, M6 so far raises prefill from 437 to about 49,000 tok/s (112×) and decode from 62 to about 275 tok/s (4.4×) over the M5 CPU baseline. Decode is currently limited by the eager attention loop; see [docs/m6-optimizations.md](docs/m6-optimizations.md).
+Measured on an RTX 5090 with the fixed benchmark workload, M6 raises prefill from 437 to about 106,000 tok/s (243×) and decode from 62 to about 7,300 tok/s (117×) over the M5 CPU baseline; see [docs/m6-optimizations.md](docs/m6-optimizations.md) for each step.
 
 ## Features
 
@@ -77,7 +77,7 @@ outputs = llm.generate(
 print(outputs[0]["text"], outputs[0]["token_ids"])
 ```
 
-`LLM` accepts the `Config` fields as keyword arguments: `max_num_seqs`, `max_num_batched_tokens`, `max_model_len`, `kvcache_block_size`, `kvcache_capacity_bytes`, `gpu_memory_utilization`, `device` (`"auto"`, `"cuda:0"`, `"cpu"`), and `dtype` (`"auto"`, `"bfloat16"`, `"float16"`, `"float32"`). With `"auto"`, the engine uses CUDA with the checkpoint dtype (or bf16) when a GPU is available, and CPU with fp32 otherwise. On CUDA, leaving `kvcache_capacity_bytes` unset sizes the KV cache after a warm-up step so that the engine uses at most `gpu_memory_utilization` (default 0.9) of the GPU, counting memory held by other processes; on CPU it defaults to 2 GiB.
+`LLM` accepts the `Config` fields as keyword arguments: `max_num_seqs`, `max_num_batched_tokens`, `max_model_len`, `kvcache_block_size`, `kvcache_capacity_bytes`, `gpu_memory_utilization`, `enforce_eager`, `device` (`"auto"`, `"cuda:0"`, `"cpu"`), and `dtype` (`"auto"`, `"bfloat16"`, `"float16"`, `"float32"`). With `"auto"`, the engine uses CUDA with the checkpoint dtype (or bf16) when a GPU is available, and CPU with fp32 otherwise. On CUDA, leaving `kvcache_capacity_bytes` unset sizes the KV cache after a warm-up step so that the engine uses at most `gpu_memory_utilization` (default 0.9) of the GPU, counting memory held by other processes; on CPU it defaults to 2 GiB. With FlashAttention on, decode steps replay CUDA Graphs captured at startup; `enforce_eager=True` turns that off.
 
 Benchmark with a randomly initialized model of Qwen3-0.6B shape (no download needed):
 
