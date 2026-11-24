@@ -86,17 +86,23 @@ class LLMEngine:
             model_runner: ModelRunner,
             eos_token_id: int | None,
             tokenizer: Any | None = None,
+            max_model_len: int | None = None,
     ) -> None:
         """Wire already-built components together.
 
         Taking components (rather than a model path) lets integration tests build
         an engine around a tiny random Qwen3 with token-id prompts and no tokenizer.
         Use ``from_config`` for a real checkpoint.
+
+        ``max_model_len``: ``add_request`` rejects requests whose prompt plus
+        ``max_tokens`` exceeds it (``None``: no limit). CUDA Graph buffers are sized
+        for it, so no sequence may grow past it.
         """
         self.scheduler = scheduler
         self.model_runner = model_runner
         self.eos_token_id = eos_token_id
         self.tokenizer = tokenizer
+        self.max_model_len = max_model_len
 
     @classmethod
     def from_config(cls, config: Config) -> LLMEngine:
@@ -132,20 +138,33 @@ class LLMEngine:
         )
         # Config.__post_init__ already resolved use_flash to a bool.
         runner = ModelRunner(model, kv_cache, block_size, use_flash=bool(config.use_flash))
+        # After the KV cache (as nano-vllm): graphs record its addresses, and their
+        # memory pool comes out of the headroom gpu_memory_utilization leaves.
+        if config.use_flash and kv_cache.use_triton and not config.enforce_eager:
+            runner.capture_cudagraphs(config.max_num_seqs, config.max_model_len)
         # Imported lazily: transformers is an optional dependency (``--extra model``).
         from transformers import AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(config.model)
         eos_token_id = tokenizer.eos_token_id
-        return cls(scheduler, runner, eos_token_id, tokenizer)
+        return cls(scheduler, runner, eos_token_id, tokenizer, config.max_model_len)
 
     def add_request(
             self, prompt: str | list[int], sampling_params: SamplingParams
     ) -> Sequence:
         """Queue one request. A ``str`` prompt is encoded with the tokenizer;
-        a ``list[int]`` is used as token ids directly. Returns the new Sequence."""
+        a ``list[int]`` is used as token ids directly. Returns the new Sequence.
+
+        Raises ``ValueError`` if prompt + ``max_tokens`` exceeds ``max_model_len``."""
         if isinstance(prompt, str):
             prompt = self.tokenizer.encode(prompt)
+        total = len(prompt) + sampling_params.max_tokens
+        if self.max_model_len is not None and total > self.max_model_len:
+            raise ValueError(
+                f"prompt ({len(prompt)} tokens) + max_tokens "
+                f"({sampling_params.max_tokens}) = {total} exceeds max_model_len "
+                f"({self.max_model_len})"
+            )
         seq = Sequence(prompt, sampling_params)
         self.scheduler.add(seq)
         return seq

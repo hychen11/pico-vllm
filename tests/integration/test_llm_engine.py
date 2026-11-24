@@ -192,6 +192,16 @@ def test_generate_returns_input_order_when_finishing_out_of_order(
         assert out["token_ids"] == greedy_reference(model, p, sp.max_tokens)
 
 
+def test_add_request_rejects_requests_longer_than_max_model_len(
+        model: Qwen3ForCausalLM,
+) -> None:
+    engine = make_engine(model)
+    engine.max_model_len = 20
+    engine.add_request(prompt(12, seed=7), SamplingParams(max_tokens=8))  # 20: fits
+    with pytest.raises(ValueError, match="exceeds max_model_len"):
+        engine.add_request(prompt(13, seed=7), SamplingParams(max_tokens=8))
+
+
 def test_generate_rejects_mismatched_params_list(model: Qwen3ForCausalLM) -> None:
     llm = make_llm(make_engine(model))
     with pytest.raises(ValueError):

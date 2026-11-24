@@ -14,7 +14,7 @@ from pico_vllm.utils.context import get_context
 
 # Optional: CPU installs and CI have no flash_attn.
 try:
-    from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache  # noqa: F401
+    from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 
     HAS_FLASH_ATTN = True
 except ImportError:
@@ -37,8 +37,10 @@ class Attention(nn.Module):
 
         With ``get_context()``:
         1. ``kv_cache.write(layer_idx, k, v, slot_mapping)``;
-        2. FA2: one ``flash_attn_varlen_func`` call over the whole batch, reading the
-           paged cache through ``block_table``; eager: for each sequence i, take its
+        2. FA2, reading the paged cache through ``block_table``: decode steps call
+           ``flash_attn_with_kvcache`` (one query per seq, CUDA Graph capturable);
+           other steps one ``flash_attn_varlen_func`` call over the whole batch.
+           Eager: for each sequence i, take its
            query rows (``cu_seqlens_q``), ``kv_cache.read`` its full context, and run
            ``causal_attention``.
         Returns ``[num_tokens, num_heads, D]``.
@@ -53,19 +55,36 @@ class Attention(nn.Module):
 
         if context.use_flash:
             # Fields: docs/concepts/attention-context.md.
-            out: torch.Tensor = flash_attn_varlen_func(
-                q,
+            # Prefill (incl. prefix-cache hits and chunks): any number of query tokens
+            # per sequence, flattened (varlen).
+            if context.is_prefill:
+                out: torch.Tensor = flash_attn_varlen_func(
+                    q,
+                    kv_cache.k_cache[self.layer_idx],  # whole paged pool of this layer
+                    kv_cache.v_cache[self.layer_idx],
+                    context.cu_seqlens_q,
+                    context.cu_seqlens_k,
+                    context.max_seqlen_q,
+                    context.max_seqlen_k,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    block_table=context.block_table,
+                )
+                return out
+            # Decode: one query token per sequence. flash_attn_with_kvcache wants
+            # [num_seqs, seqlen_q, heads, D]; seqlen_q is always 1 here. Lengths come
+            # from the GPU tensor cache_seqlens (no Python ints), so the step can be
+            # captured in a CUDA Graph. Pass it by keyword: the 4th positional is k.
+            out = flash_attn_with_kvcache(
+                q.unsqueeze(1),  # [num_seqs, 1, num_heads, D]
                 kv_cache.k_cache[self.layer_idx],  # whole paged pool of this layer
                 kv_cache.v_cache[self.layer_idx],
-                context.cu_seqlens_q,
-                context.cu_seqlens_k,
-                context.max_seqlen_q,
-                context.max_seqlen_k,
+                cache_seqlens=context.cache_seqlens,  # includes this step's token
+                block_table=context.block_table,
                 softmax_scale=self.scale,
                 causal=True,
-                block_table=context.block_table,
             )
-            return out
+            return out.squeeze(1)  # [num_seqs, num_heads, D]
         cu = context.cu_seqlens_q.tolist()
         outputs = []
         for i in range(len(context.block_tables)):

@@ -103,6 +103,8 @@ def build_engine(
         max_num_batched_tokens: int,
         use_triton: bool | None = None,
         use_flash: bool | None = None,
+        use_cuda_graph: bool = True,
+        max_model_len: int = 4096,
 ) -> LLMEngine:
     """Wrap an already-placed ``model`` in a fresh scheduler, KV cache and engine."""
     param = next(model.parameters())
@@ -119,7 +121,9 @@ def build_engine(
     scheduler = Scheduler(max_num_seqs, max_num_batched_tokens, num_blocks, block_size)
     use_flash = resolve_use_flash(use_flash, param.device, param.dtype, block_size)
     runner = ModelRunner(model, kv_cache, block_size, use_flash=use_flash)
-    return LLMEngine(scheduler, runner, eos_token_id=None)
+    if use_flash and kv_cache.use_triton and use_cuda_graph:
+        runner.capture_cudagraphs(max_num_seqs, max_model_len)
+    return LLMEngine(scheduler, runner, eos_token_id=None, max_model_len=max_model_len)
 
 
 def generate(engine: LLMEngine, prompts: list[list[int]], sp: SamplingParams) -> int:
@@ -165,6 +169,7 @@ def run_benchmark(
         warmup: bool = True,
         use_triton: bool | None = None,
         use_flash: bool | None = None,
+        use_cuda_graph: bool = True,
 ) -> BenchmarkResult:
     """``model_path``: load that checkpoint (and its config); otherwise random weights
     with ``hf_config`` (default: Qwen3-0.6B shapes)."""
@@ -187,7 +192,7 @@ def run_benchmark(
             model, hf_config, kvcache_capacity_bytes=kvcache_capacity_bytes,
             block_size=block_size, max_num_seqs=max_num_seqs,
             max_num_batched_tokens=max_num_batched_tokens, use_triton=use_triton,
-            use_flash=use_flash,
+            use_flash=use_flash, use_cuda_graph=use_cuda_graph,
         )
 
     prompts = make_prompts(num_seqs, min_input_len, max_input_len, hf_config.vocab_size, seed)
@@ -231,6 +236,8 @@ def main(argv: list[str] | None = None) -> None:
                         help="force the eager KV-cache write (A/B against the Triton kernel)")
     parser.add_argument("--no-flash", action="store_true",
                         help="force the eager attention (A/B against FlashAttention 2)")
+    parser.add_argument("--no-cuda-graph", action="store_true",
+                        help="launch decode kernels one by one (A/B against CUDA Graph)")
     args = parser.parse_args(argv)
 
     result = run_benchmark(
@@ -246,11 +253,13 @@ def main(argv: list[str] | None = None) -> None:
         model_path=os.path.expanduser(args.model) if args.model else None,
         use_triton=False if args.no_triton else None,
         use_flash=False if args.no_flash else None,
+        use_cuda_graph=not args.no_cuda_graph,
     )
     name = torch.cuda.get_device_name(args.device) if args.device.startswith("cuda") else "cpu"
     weights = args.model or "random (Qwen3-0.6B shapes)"
     print(f"device={name} dtype={args.dtype} triton_kv_store={not args.no_triton} "
-          f"flash={not args.no_flash} weights={weights}")
+          f"flash={not args.no_flash} cuda_graph={not args.no_cuda_graph} "
+          f"weights={weights}")
     print(result)
 
 

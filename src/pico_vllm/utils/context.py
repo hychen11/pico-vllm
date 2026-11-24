@@ -53,23 +53,31 @@ class Context:
     More detail: docs/concepts/attention-context.md.
     """
 
+    # --- Shared: every attention path reads these. ---
     is_prefill: bool = False
-    # [num_seqs + 1]: query tokens of seq i are flat rows cu_seqlens_q[i]:cu_seqlens_q[i+1].
-    cu_seqlens_q: torch.Tensor | None = None
+    use_flash: bool = False  # ModelRunner copies it from Config.use_flash
+    kv_cache: PagedKVCache | None = None
     # [num_tokens]: flat KV slot to write each query token's K/V into.
     slot_mapping: torch.Tensor | None = None
+    # [num_seqs + 1]: query tokens of seq i are flat rows cu_seqlens_q[i]:cu_seqlens_q[i+1].
+    cu_seqlens_q: torch.Tensor | None = None
+
+    # --- Eager attention (Python lists, looped over per sequence). ---
     # Per seq: total tokens with KV after this step (cached + scheduled).
     context_lens: list[int] = field(default_factory=list)
     # Per seq: physical block ids (Sequence.block_table).
     block_tables: list[list[int]] = field(default_factory=list)
-    kv_cache: PagedKVCache | None = None
-    # FA2 inputs (int32 tensors). cu_seqlens_k: [num_seqs + 1], prefix sums of context_lens.
-    cu_seqlens_k: torch.Tensor | None = None
-    max_seqlen_q: int = 0  # max query tokens of any seq in this step
-    max_seqlen_k: int = 0  # max(context_lens)
-    # [num_seqs, max_num_blocks]: block_tables padded with -1 (FA2 stops at seqlen_k).
+
+    # --- FlashAttention 2 (int32 GPU tensors, plus two Python ints for varlen). ---
+    # [num_seqs, max_num_blocks]: block_tables padded with -1 (FA2 stops at the seq length).
     block_table: torch.Tensor | None = None
-    use_flash: bool = False  # ModelRunner copies it from Config.use_flash
+    # varlen (prefill): [num_seqs + 1], prefix sums of context_lens.
+    cu_seqlens_k: torch.Tensor | None = None
+    max_seqlen_q: int = 0  # varlen: max query tokens of any seq in this step
+    max_seqlen_k: int = 0  # varlen: max(context_lens)
+    # flash_attn_with_kvcache (decode): [num_seqs], same values as context_lens. A GPU
+    # tensor, not a Python int like max_seqlen_k, so a CUDA Graph can replay it.
+    cache_seqlens: torch.Tensor | None = None
 
 
 _CONTEXT = Context()

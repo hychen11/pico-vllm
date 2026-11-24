@@ -38,6 +38,9 @@ class Config:
     # FlashAttention 2 (M6). None: on whenever the setup supports it (see
     # ``resolve_use_flash``); True: require it; False: force the eager attention.
     use_flash: bool | None = None
+    # True: never use CUDA Graphs. Otherwise decode steps replay captured graphs
+    # whenever FlashAttention and the Triton KV write are on (M6 step 6).
+    enforce_eager: bool = False
     hf_config: Any = field(default=None, init=False)
 
     def __post_init__(self) -> None:

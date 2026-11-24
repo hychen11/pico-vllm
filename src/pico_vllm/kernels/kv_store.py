@@ -38,6 +38,8 @@ if HAS_TRITON:
     ):
         i = tl.program_id(0).to(tl.int64)
         slot = tl.load(slot_mapping_ptr + i)
+        if slot == -1:  # padding row of a CUDA Graph batch: write nothing
+            return
         offs = tl.arange(0, BLOCK)
         mask = offs < ROW
         k = tl.load(k_ptr + i * k_row_stride + offs, mask=mask)
