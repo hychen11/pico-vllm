@@ -41,6 +41,10 @@ class Config:
     # True: never use CUDA Graphs. Otherwise decode steps replay captured graphs
     # whenever FlashAttention and the Triton KV write are on (M6 step 6).
     enforce_eager: bool = False
+    # Number of GPUs to split each layer across (M8, single machine; rank i uses
+    # cuda:i). > 1 forces ``enforce_eager``. ``use_flash`` is not changed: pass
+    # False when not every GPU can run FlashAttention 2.
+    tensor_parallel_size: int = 1
     hf_config: Any = field(default=None, init=False)
 
     def __post_init__(self) -> None:
@@ -60,6 +64,12 @@ class Config:
         self.hf_config = AutoConfig.from_pretrained(self.model)
         self.max_model_len = min(self.max_model_len, self.hf_config.max_position_embeddings)
         self.device = resolve_device(self.device)
+        tp, hf = self.tensor_parallel_size, self.hf_config
+        if tp < 1 or hf.num_attention_heads % tp or hf.num_key_value_heads % tp:
+            raise ValueError(f"tensor_parallel_size={tp} must be >= 1 and divide "
+                             f"num_attention_heads and num_key_value_heads")
+        if tp > 1:
+            self.enforce_eager = True  # graph capture under TP would hang (ranks not in lockstep)
         self.dtype = resolve_dtype(self.dtype, self.device, self.hf_config)
         self.use_flash = resolve_use_flash(
             self.use_flash, self.device, self.dtype, self.kvcache_block_size

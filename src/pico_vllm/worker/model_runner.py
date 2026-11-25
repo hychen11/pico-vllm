@@ -100,8 +100,9 @@ class ModelRunner:
         return as_tensor(input_ids), as_tensor(positions), context
 
     @torch.inference_mode()
-    def run(self, seqs: list[Sequence], is_prefill: bool) -> torch.Tensor:
-        """One model step. Returns logits ``[num_seqs, vocab]`` at each seq's last query token.
+    def run(self, seqs: list[Sequence], is_prefill: bool) -> torch.Tensor | None:
+        """One model step. Returns logits ``[num_seqs, vocab]`` at each seq's last query
+        token on rank 0, ``None`` on the other TP ranks (the LM head gathers to rank 0).
 
         Decode steps replay a captured graph (``_replay``) when there are any. Every
         decode step fits one: the scheduler runs at most ``max_num_seqs`` seqs and
@@ -152,7 +153,7 @@ class ModelRunner:
             "slot_mapping": buffer(max_bs, dtype=torch.long, fill=-1),  # -1: no KV write
             "cache_seqlens": buffer(max_bs, dtype=torch.int32),
             "block_table": buffer(max_bs, max_blocks_per_seq, dtype=torch.int32, fill=-1),
-            "outputs": torch.zeros(max_bs, self.model.lm_head.in_features,
+            "outputs": torch.zeros(max_bs, self.model.lm_head.embedding_dim,
                                    dtype=self.kv_cache.k_cache.dtype, device=device),
         }
         # 1. Warm up every size, then 2. capture them.

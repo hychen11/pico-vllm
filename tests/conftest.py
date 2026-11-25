@@ -7,6 +7,27 @@ import random
 import pytest
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _single_rank_group():  # noqa: ANN202
+    """One world_size=1 process group for the whole session (M8 step 1).
+
+    The model's layers read the TP rank/size from torch.distributed, as in
+    nano-vllm, and many tests build models directly instead of through
+    ``LLMEngine.from_config``. gloo works for CPU and CUDA tensors here, since
+    world_size=1 never communicates. Engines see the group and reuse it.
+    """
+    import torch.distributed as dist
+
+    from pico_vllm.worker.process_group import free_port
+
+    if not dist.is_initialized():
+        dist.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{free_port()}",
+                                world_size=1, rank=0)
+    yield
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
 @pytest.fixture(autouse=True)
 def _seed_python_random() -> None:
     """Keep tests deterministic before PyTorch-based tests are introduced."""

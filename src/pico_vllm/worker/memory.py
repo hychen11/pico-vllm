@@ -21,6 +21,7 @@ import math
 from typing import Any
 
 import torch
+import torch.distributed as dist
 
 from pico_vllm.core.paged_kv_cache import PagedKVCache
 from pico_vllm.sampler import sample
@@ -60,7 +61,8 @@ def profile_activation_bytes(
 
     cache = PagedKVCache(
         hf_config.num_hidden_layers, num_seqs * blocks_per_seq, block_size,
-        hf_config.num_key_value_heads, hf_config.head_dim, dtype=dtype, device=device,
+        hf_config.num_key_value_heads // dist.get_world_size(), hf_config.head_dim,
+        dtype=dtype, device=device,
     )
     runner = ModelRunner(model, cache, block_size, use_flash=use_flash)
     seqs = []

@@ -3,6 +3,12 @@
 M3 runs one sequence at a time: ``input_ids`` and ``positions`` are 1-D ``[N]`` tensors
 for a single prompt, and attention is plain causal attention without a KV cache.
 Batched/paged attention is connected to the scheduler's block tables in M4.
+
+Tensor parallel (M8): qkv_proj / gate_up_proj are column parallel and o_proj /
+down_proj row parallel (one all_reduce each), so each rank runs
+``num_attention_heads / tp`` query heads, ``num_key_value_heads / tp`` KV heads and
+1/tp of the MLP. Embedding and LM head split the vocabulary. The TP size is the
+torch.distributed world size (1 without TP).
 """
 
 from __future__ import annotations
@@ -10,33 +16,38 @@ from __future__ import annotations
 from typing import Any
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
 
 from pico_vllm.config import get_rope_theta
 from pico_vllm.layers.activation import SiluAndMul
 from pico_vllm.layers.attention import Attention
+from pico_vllm.layers.embed_head import ParallelLMHead, VocabParallelEmbedding
 from pico_vllm.layers.layernorm import RMSNorm
-from pico_vllm.layers.linear import MergedLinear, QKVLinear
+from pico_vllm.layers.linear import MergedLinear, QKVLinear, RowParallelLinear, divide
 from pico_vllm.layers.rotary_embedding import RotaryEmbedding
 
 
 class Qwen3Attention(nn.Module):
     def __init__(self, config: Any, layer_idx: int) -> None:
         super().__init__()
-        self.num_heads = config.num_attention_heads
-        self.num_kv_heads = config.num_key_value_heads
-        assert self.num_heads % self.num_kv_heads == 0
+        tp_size = dist.get_world_size()
+        total_heads, total_kv_heads = config.num_attention_heads, config.num_key_value_heads
+        assert total_heads % total_kv_heads == 0
+        self.num_heads = divide(total_heads, tp_size)  # this rank's heads
+        self.num_kv_heads = divide(total_kv_heads, tp_size)
         self.head_dim = config.head_dim  # Qwen3Config always sets it (default 128)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim ** -0.5
         bias = config.attention_bias
 
+        # Both take the full sizes and keep this rank's share themselves.
         self.qkv_proj = QKVLinear(
-            config.hidden_size, self.head_dim, self.num_heads, self.num_kv_heads, bias
+            config.hidden_size, self.head_dim, total_heads, total_kv_heads, bias
         )
-        self.o_proj = nn.Linear(self.q_size, config.hidden_size, bias=bias)
+        self.o_proj = RowParallelLinear(total_heads * self.head_dim, config.hidden_size, bias)
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.rotary_emb = RotaryEmbedding(
@@ -74,7 +85,7 @@ class Qwen3MLP(nn.Module):
     def __init__(self, config: Any) -> None:
         super().__init__()
         self.gate_up_proj = MergedLinear(config.hidden_size, [config.intermediate_size] * 2)
-        self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
+        self.down_proj = RowParallelLinear(config.intermediate_size, config.hidden_size)
         self.act_fn = SiluAndMul()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -99,7 +110,7 @@ class Qwen3DecoderLayer(nn.Module):
 class Qwen3Model(nn.Module):
     def __init__(self, config: Any) -> None:
         super().__init__()
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList(
             [Qwen3DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
@@ -125,7 +136,7 @@ class Qwen3ForCausalLM(nn.Module):
     def __init__(self, config: Any) -> None:
         super().__init__()
         self.model = Qwen3Model(config)
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
@@ -133,6 +144,6 @@ class Qwen3ForCausalLM(nn.Module):
         """Return final hidden states ``[N, hidden_size]``."""
         return self.model(input_ids, positions)
 
-    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Return logits ``[N, vocab_size]``."""
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
+        """Return logits ``[N, vocab_size]`` on rank 0, ``None`` on the other ranks."""
         return self.lm_head(hidden_states)

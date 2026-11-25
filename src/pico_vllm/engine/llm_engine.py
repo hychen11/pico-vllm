@@ -26,6 +26,7 @@ from pico_vllm.sequence import Sequence
 from pico_vllm.utils.loader import init_on, load_model
 from pico_vllm.worker.memory import num_blocks_from_gpu_memory, profile_activation_bytes
 from pico_vllm.worker.model_runner import ModelRunner
+from pico_vllm.worker.process_group import init_process_group
 
 
 def build_model(config: Config) -> Qwen3ForCausalLM:
@@ -46,9 +47,9 @@ def num_kv_blocks(config: Config, model: Qwen3ForCausalLM) -> int:
     Raises ``ValueError`` when not even one block fits.
     """
     hf = config.hf_config
-    block_bytes = kv_block_bytes(
-        hf.num_hidden_layers, config.kvcache_block_size, hf.num_key_value_heads, hf.head_dim,
-        config.dtype,
+    block_bytes = kv_block_bytes(  # this rank's KV heads only
+        hf.num_hidden_layers, config.kvcache_block_size,
+        hf.num_key_value_heads // config.tensor_parallel_size, hf.head_dim, config.dtype,
     )
     capacity = config.kvcache_capacity_bytes
     if capacity is None and config.device.type == "cuda":
@@ -87,6 +88,7 @@ class LLMEngine:
             eos_token_id: int | None,
             tokenizer: Any | None = None,
             max_model_len: int | None = None,
+            owns_group: bool = False,
     ) -> None:
         """Wire already-built components together.
 
@@ -97,12 +99,16 @@ class LLMEngine:
         ``max_model_len``: ``add_request`` rejects requests whose prompt plus
         ``max_tokens`` exceeds it (``None``: no limit). CUDA Graph buffers are sized
         for it, so no sequence may grow past it.
+
+        ``owns_group``: this engine created the torch.distributed process group
+        (``from_config``), so it is the one to destroy it on exit (M8 step 5).
         """
         self.scheduler = scheduler
         self.model_runner = model_runner
         self.eos_token_id = eos_token_id
         self.tokenizer = tokenizer
         self.max_model_len = max_model_len
+        self.owns_group = owns_group
 
     @classmethod
     def from_config(cls, config: Config) -> LLMEngine:
@@ -121,6 +127,11 @@ class LLMEngine:
             # returned, and the auto-sized cache shrinks with every new engine.
             gc.collect()
             torch.cuda.empty_cache()
+        if config.tensor_parallel_size > 1:
+            # A world_size > 1 group would wait forever for ranks nobody started.
+            raise NotImplementedError("tensor_parallel_size > 1 needs the worker "
+                                      "processes of M8 step 5")
+        owns_group = init_process_group(config.tensor_parallel_size, config.device)
         model = build_model(config)
 
         hf = config.hf_config
@@ -128,8 +139,9 @@ class LLMEngine:
         block_size = config.kvcache_block_size
         num_blocks = num_kv_blocks(config, model)
 
-        kv_cache = PagedKVCache(
-            hf.num_hidden_layers, num_blocks, block_size, hf.num_key_value_heads, hf.head_dim,
+        kv_cache = PagedKVCache(  # this rank's KV heads only
+            hf.num_hidden_layers, num_blocks, block_size,
+            hf.num_key_value_heads // config.tensor_parallel_size, hf.head_dim,
             dtype=dtype, device=config.device,
         )
         Sequence.block_size = block_size
@@ -147,7 +159,8 @@ class LLMEngine:
 
         tokenizer = AutoTokenizer.from_pretrained(config.model)
         eos_token_id = tokenizer.eos_token_id
-        return cls(scheduler, runner, eos_token_id, tokenizer, config.max_model_len)
+        return cls(scheduler, runner, eos_token_id, tokenizer, config.max_model_len,
+                   owns_group=owns_group)
 
     def add_request(
             self, prompt: str | list[int], sampling_params: SamplingParams

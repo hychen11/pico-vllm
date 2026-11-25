@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+import torch.distributed as dist
 
 from pico_vllm.config import DTYPES, resolve_use_flash
 from pico_vllm.core.paged_kv_cache import PagedKVCache, num_blocks_from_capacity
@@ -37,6 +38,7 @@ from pico_vllm.sampling_params import SamplingParams
 from pico_vllm.sequence import Sequence
 from pico_vllm.utils.loader import init_on, load_model
 from pico_vllm.worker.model_runner import ModelRunner
+from pico_vllm.worker.process_group import init_process_group
 
 
 def qwen3_0_6b_config(**overrides: Any) -> Any:
@@ -109,12 +111,13 @@ def build_engine(
     """Wrap an already-placed ``model`` in a fresh scheduler, KV cache and engine."""
     param = next(model.parameters())
     head_dim = hf_config.head_dim
+    num_kv_heads = hf_config.num_key_value_heads // dist.get_world_size()  # this rank's
     num_blocks = num_blocks_from_capacity(
         kvcache_capacity_bytes, hf_config.num_hidden_layers, block_size,
-        hf_config.num_key_value_heads, head_dim, param.dtype,
+        num_kv_heads, head_dim, param.dtype,
     )
     kv_cache = PagedKVCache(
-        hf_config.num_hidden_layers, num_blocks, block_size, hf_config.num_key_value_heads,
+        hf_config.num_hidden_layers, num_blocks, block_size, num_kv_heads,
         head_dim, dtype=param.dtype, device=param.device, use_triton=use_triton,
     )
     Sequence.block_size = block_size
@@ -181,6 +184,7 @@ def run_benchmark(
         hf_config = qwen3_0_6b_config()
     torch.manual_seed(seed)
     dev = torch.device(device)
+    init_process_group(1, dev)  # the layers read the TP rank/size from it
     with init_on(dev, dtype):
         model = Qwen3ForCausalLM(hf_config)
     if model_path is not None:
