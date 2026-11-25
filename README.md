@@ -124,6 +124,7 @@ uv run python -m pico_vllm.benchmark --device cuda:0 --no-triton   # eager KV wr
 | --- | --- |
 | [ROADMAP.md](ROADMAP.md) | milestones M0–M11 and their tests |
 | [docs/m6-optimizations.md](docs/m6-optimizations.md) | each M6 optimization: what improved, how, and by how much |
+| [docs/m8-tp-guide.md](docs/m8-tp-guide.md) | M8 step-by-step plan for tensor parallelism, with the step 0 environment check (`scripts/check_tp_env.py`) and its results on this machine |
 | [docs/m7-hardening.md](docs/m7-hardening.md) | M7: the invariants the tests check, the bugs they found, and what each new test covers |
 | [docs/experiments/m6-triton-kv-store.md](docs/experiments/m6-triton-kv-store.md) | Triton KV-store experiment and environment |
 | [docs/design-vs-nano-vllm.md](docs/design-vs-nano-vllm.md) | M1–M5 design compared with nano-vllm |
@@ -131,6 +132,7 @@ uv run python -m pico_vllm.benchmark --device cuda:0 --no-triton   # eager KV wr
 | [docs/concepts/attention-context.md](docs/concepts/attention-context.md) | the attention fields in `Context` (`cu_seqlens_q/k`, `max_seqlen_q/k`, `block_table`): why q holds only new tokens while KV covers the whole sequence |
 | [docs/concepts/kv-cache-sizing.md](docs/concepts/kv-cache-sizing.md) | how the KV cache is sized from GPU memory: the budget formula, the prefill + decode warm-up that measures the activation peak, and why the engine runs `gc.collect()` before loading weights |
 | [docs/concepts/decode-attention-and-cuda-graph.md](docs/concepts/decode-attention-and-cuda-graph.md) | decode FlashAttention inputs and why decode steps can be captured as CUDA graphs |
+| [docs/concepts/tp-linear-layers.md](docs/concepts/tp-linear-layers.md) | M8 tensor-parallel layers: column/row-parallel pairs, why packed qkv/gate_up projections split each shard separately (`_PackedLinear`), and the vocab-parallel embedding and LM head |
 
 ## Qwen3 forward path
 
