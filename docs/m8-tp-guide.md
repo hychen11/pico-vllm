@@ -299,7 +299,7 @@ exit:         所有 rank close                  → barrier → rank 0 unlink�
 
 | 坑 | 原因和处理 |
 | --- | --- |
-| **子进程里 `Sequence.block_size` 又变回 256** | spawn 会重新 import 模块，类属性不继承。worker 初始化时要从 config 里重新设置。测试用 block_size=4 时，如果忘了这一步，rank 1 算的 slot 会全部错位 |
+| 子进程里 `Sequence.block_size` 又变回 256 | spawn 会重新 import 模块，类属性不继承。worker 初始化时从 config 里重新设置了。**实测这只是一层保险**：worker 只执行 `run`，而 `ModelRunner` 算 slot 用的是自己的 `self.block_size`，block_table 也是 rank 0 算好传过来的，都不读 `Sequence.block_size`。去掉这一行，第 7 步的测试（block_size=16）照样通过。只有 worker 里调用 `Sequence` 按块计算的方法（`num_blocks`、`block(i)`）时才会出错 |
 | rank 1 报错后 rank 0 卡住 | rank 0 会一直等 all_reduce（NCCL 默认要等 10 分钟）。**已处理**：`init_process_group(timeout=60s)`（`process_group.TIMEOUT`）。实测：往 worker 的 `run` 里注入一个异常，worker 打印 traceback 后退出；rank 0 在 all_reduce 里等了 60 s，NCCL watchdog 判定超时，再等 15 s 做健康检查后 abort（退出码 134），`/dev/shm` 由 resource tracker 清理。没有用 Queue 传异常，简单一些 |
 | worker 在 `event.wait()` 里被杀掉（SIGKILL / OOM killer），rank 0 永远卡住 | **未处理，已知限制**。`mp.Event.set()` 底层的 `Condition.notify` 会等每个正在 wait 的进程确认自己醒了，死掉的进程永远不会确认，于是 rank 0 卡在 `write_shm` 的 `event.set()` 里，根本走不到 all_reduce，NCCL 超时管不到。nano-vllm 也有同样的问题。真要处理的话，可以在 `call` 之前检查 `process.is_alive()`（仍有竞态），或者换掉 Event 的实现 |
 | 第二次启动报 `FileExistsError` | 上次异常退出时共享内存没有 unlink。名字里带上 rank 0 的 pid |

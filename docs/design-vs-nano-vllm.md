@@ -30,7 +30,7 @@
 | 采样 | 支持 `temperature = 0`（贪心，`argmax`），同一 batch 可以混合贪心和随机采样；随机采样用 `torch.multinomial`，可传 `generator` 保证测试可复现 | 不允许贪心（`temperature` 必须 > 1e-10）；用 Gumbel-max 技巧（`probs / Exponential(1)` 再 `argmax`），并用 `torch.compile` 编译 | 本项目的测试依赖贪心输出做对比 |
 | RMSNorm / RoPE / SiLU | 普通 PyTorch 实现 | 用 `torch.compile` 融合；RMSNorm 把残差相加和归一化融合在一起（`add_rms_forward`） | 可作为 M6 之后的优化项 |
 | CUDA Graph | 无 | decode 时按 batch 大小 1、2、4、8、16、32…512 录制 graph；Triton kernel 遇到 `slot == -1`（补齐的空位）直接跳过 | M6 第 6 步已实现，做法相同。区别：档位上限取 `max_num_seqs` 本身（nano-vllm 是 `min(max_num_seqs, 512)`，超过 512 条回退 eager），并且 `add_request` 拒绝超过 `max_model_len` 的请求，所以每个 decode 步都有 graph；`run` 用"是否录过 graph"判断，不在 runner 上另存 `enforce_eager` |
-| 张量并行 | 无，单卡 | 支持 TP：`ColumnParallelLinear` / `RowParallelLinear` / `VocabParallelEmbedding`，NCCL all-reduce，多进程之间用共享内存传调用 | 已排进 ROADMAP 的 M8 |
+| 张量并行 | 无，单卡 | 支持 TP：`ColumnParallelLinear` / `RowParallelLinear` / `VocabParallelEmbedding`，NCCL all-reduce，多进程之间用共享内存传调用 | M8 已实现，做法相同（层里直接调用 `torch.distributed`，rank 0 通过共享内存 + Event 广播调用）。不同之处：端口不写死；KV block 数在各 rank 间取最小值（两张卡不一样）；process group 有 60 秒超时；TP>1 时不录 CUDA Graph。见 [m8-tensor-parallel.md](m8-tensor-parallel.md) |
 | 对外接口 | `LLM.generate`；`add_request` 返回 `Sequence`；`step()` 返回本步结束的序列 | `LLM.generate` 带 tqdm 进度条，实时显示 prefill / decode 吞吐 | — |
 | 测试 | 184 个测试（单元、集成、CUDA 对比） | 没有测试，只有 `example.py` 和 `bench.py` | ROADMAP 要求每个里程碑都有测试 |
 | 代码量 | `src/` 1763 行，`tests/` 2371 行 | 约 1450 行（含 `example.py` 和 `bench.py`） | 本项目多出的部分主要是文档字符串、CPU 路径和配置 |

@@ -20,6 +20,7 @@ The milestone-by-milestone plan is in [ROADMAP.md](ROADMAP.md).
 | M5 | offline `LLM.generate` API | done |
 | M6 | CUDA fast path | done: GPU + bf16, Triton KV-store kernel, FlashAttention 2, KV cache sized from free GPU memory, CUDA Graph decode |
 | M7 | test coverage and correctness hardening | done: randomized scheduler / block-manager invariant tests, engine parity under pressure, abort, request validation; four bugs fixed ([docs/m7-hardening.md](docs/m7-hardening.md)) |
+| M8 | tensor parallelism | done: column/row/vocab-parallel layers, worker processes driven over shared memory, `LLM(..., tensor_parallel_size=N)` and `benchmark --tp`; matches TP=1 (fp32 logits within 3.1e-5); correctness only on this machine ([docs/m8-tensor-parallel.md](docs/m8-tensor-parallel.md)) |
 
 Measured on an RTX 5090 with the fixed benchmark workload, M6 raises prefill from 437 to about 106,000 tok/s (243×) and decode from 62 to about 7,300 tok/s (117×) over the M5 CPU baseline; see [docs/m6-optimizations.md](docs/m6-optimizations.md) for each step.
 
@@ -34,8 +35,9 @@ Measured on an RTX 5090 with the fixed benchmark workload, M6 raises prefill fro
 - Abort: `LLMEngine.abort_request(seq)` drops a waiting, running, preempted or half-prefilled request and frees its blocks.
 - Sampling: greedy (`temperature=0`) and temperature sampling, mixed freely within one batch; EOS, `max_tokens`, `ignore_eos`.
 - CUDA fast path: bf16 by default on GPU, Triton KV-store kernel; eager fallback on CPU.
+- Tensor parallelism on one machine (`tensor_parallel_size`): attention heads, MLP and vocabulary split across GPUs with NCCL all-reduce; TP>1 runs eager (no CUDA Graph).
 
-Not in scope yet: top-k/top-p, tensor parallelism, quantization, LoRA, multimodal and MoE models, speculative decoding, HTTP serving.
+Not in scope yet: top-k/top-p, quantization, LoRA, multimodal and MoE models, speculative decoding, HTTP serving.
 
 ## Installation
 
@@ -124,6 +126,7 @@ uv run python -m pico_vllm.benchmark --device cuda:0 --no-triton   # eager KV wr
 | --- | --- |
 | [ROADMAP.md](ROADMAP.md) | milestones M0–M11 and their tests |
 | [docs/m6-optimizations.md](docs/m6-optimizations.md) | each M6 optimization: what improved, how, and by how much |
+| [docs/m8-tensor-parallel.md](docs/m8-tensor-parallel.md) | M8 results: TP=2 vs TP=1 correctness, throughput, where a step's time goes, NCCL bandwidth between the two GPUs, KV capacity |
 | [docs/m8-tp-guide.md](docs/m8-tp-guide.md) | M8 step-by-step plan for tensor parallelism, with the step 0 environment check (`scripts/check_tp_env.py`) and its results on this machine |
 | [docs/m7-hardening.md](docs/m7-hardening.md) | M7: the invariants the tests check, the bugs they found, and what each new test covers |
 | [docs/experiments/m6-triton-kv-store.md](docs/experiments/m6-triton-kv-store.md) | Triton KV-store experiment and environment |
