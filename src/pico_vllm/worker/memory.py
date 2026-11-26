@@ -79,7 +79,8 @@ def profile_activation_bytes(
 
     # 1. Largest prefill: the whole token budget, e.g. 4 prompts x 4096 tokens.
     logits = runner.run(seqs, is_prefill=True)
-    sample(logits, torch.zeros(num_seqs, device=device))
+    if logits is not None:  # None on TP ranks > 0: only rank 0 samples
+        sample(logits, torch.zeros(num_seqs, device=device))
     del logits
 
     # 2. Largest decode: max_num_seqs sequences, one token each, every one with a
@@ -95,7 +96,8 @@ def profile_activation_bytes(
         seq.num_scheduled_tokens = 1
         decode_seqs.append(seq)
     logits = runner.run(decode_seqs, is_prefill=False)
-    sample(logits, torch.zeros(max_num_seqs, device=device))
+    if logits is not None:
+        sample(logits, torch.zeros(max_num_seqs, device=device))
 
     torch.cuda.synchronize(device)
     peak = torch.cuda.max_memory_allocated(device) - base

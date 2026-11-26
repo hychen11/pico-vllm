@@ -162,7 +162,7 @@ nano-vllm 不用处理、我们要处理的三件事：
       return True
   ```
 
-  返回值存到 engine 上（`self._owns_group`）。第 5 步的 `exit()` 里只有它为 True 才 `destroy_process_group()`。TP=1 时 world_size=1，层里的 `if tp_size > 1` 都不成立，不会真的通信；NCCL 在第一次集合通信时才建通信器，所以 TP=1 也几乎没有开销。
+  返回值存到 runner 上（`self.owns_group`）。第 5 步的 `exit()` 里只有它为 True 才 `destroy_process_group()`。TP=1 时 world_size=1，层里的 `if tp_size > 1` 都不成立，不会真的通信；NCCL 在第一次集合通信时才建通信器，所以 TP=1 也几乎没有开销。
 
 - `tests/conftest.py` 加 session 级 autouse fixture：
 
@@ -255,19 +255,69 @@ CPU 测试用 fp32，结果可以精确比较（只要求和顺序相同）或�
 - engine 用 `mp.get_context("spawn")` 启动 rank 1 … tp−1，每个子进程运行一个函数：`dist.init_process_group("nccl", ..., world_size=tp, rank=i)` + `torch.cuda.set_device(i)` → 建模型、加载权重 → 建 KV cache → 进入 `loop()`。
 - rank 0 的 `call(method, *args)`：tp > 1 时把 `pickle.dumps([method, *args])` 写进共享内存（前 4 个字节写长度），对每个 worker 的 `Event` 调用 `set()`，然后自己也执行这个方法。
 - worker 的 `loop()`：`event.wait()` → 读出 (方法, 参数) → `event.clear()` → 执行 → 方法是 `"exit"` 时退出循环。
-- 退出：rank 0 调用 `call("exit")`；`ModelRunner.exit()` 里关闭共享内存（rank 0 再 `unlink`）、`destroy_process_group()`（rank 0 只在 `_owns_group` 时）；engine 再 `join` 子进程。`atexit.register(self.exit)` 用于用户没有手动调用的情况。这就是 nano-vllm 里 `exit()` 和 `atexit` 那段代码的用途。
+- 退出：rank 0 调用 `call("exit")`；`ModelRunner.exit()` 里关闭共享内存（rank 0 再 `unlink`）、`destroy_process_group()`（只在 `owns_group` 时）；engine 再 `join` 子进程。`atexit.register(self.exit)` 用于用户没有手动调用的情况。这就是 nano-vllm 里 `exit()` 和 `atexit` 那段代码的用途。
+
+### 共享内存里存的是什么
+
+**一句话**：只有 rank 0 写，其他 rank 只读。写的内容是一条命令，也就是"调用哪个方法、传什么参数"，不是张量。
+
+**为什么需要**：只有 rank 0 有 Scheduler，知道这一步要算哪些 seq。其他 rank 也必须用**同样的** seqs 跑 `run`，否则每层的 all_reduce 对不上，程序会卡死。但不同进程的内存互相看不到，所以 rank 0 每一步都要把调度结果"告诉"它们。
+
+**打个比方**：两个厨师在隔开的两个房间里，每道菜各做一半。只有主厨（rank 0）手上有菜单。两个房间之间挂着一块**黑板**（`SharedMemory`），还有一个**门铃**（`Event`）：
+
+1. 主厨在黑板上写"run：这几条 seq，decode"（`write_shm`），然后按门铃（`event.set()`）；
+2. 帮厨一直在等门铃（`loop()` 里的 `event.wait()`），听到后读黑板（`read_shm`），把门铃复位（`event.clear()`）；
+3. 两人执行同一个 `run`，各算一半的 head，每层通过 NCCL all_reduce 把结果加起来。
+
+黑板上写的只是**命令**；菜本身，也就是张量计算的结果，走的是 NCCL，不经过 shm。worker 从不往 shm 里写，也不需要回传结果：只有 rank 0 用 logits 做 sample，worker 的 `run` 返回 None。TP=3 时 rank 0 写一次、按两个门铃，两个 worker 读的是同一块黑板。
+
+**格式**：黑板上只能写字节，所以 Python 对象要先 pickle：
+
+```text
+shm.buf: [ 4 字节：长度 n ][ n 字节：pickle.dumps((method, args)) ][ 没用到的部分 ]
+```
+
+一共只会出现两种命令：
+
+| 时机 | 内容 |
+| --- | --- |
+| 每个 step | `("run", (seqs, is_prefill))`。seqs 是 `Sequence` 对象，带着 `token_ids`、`block_table`、`num_cached_tokens`、`num_scheduled_tokens` 等；worker 靠这些自己算出 input_ids、positions 和 slot_mapping |
+| 退出时 | `("exit", ())` |
+
+**只有一块黑板，rank 0 会不会把还没读完的命令覆盖掉？** 不会。`run` 里每层都有 all_reduce，rank 0 必须等所有 worker 进入 all_reduce 才能继续，所以等它执行到下一次 `write_shm` 时，所有 worker 早就读完了上一条。`exit` 里的 barrier 也起同样的作用。
+
+**创建和销毁的顺序**：
+
+```text
+from_config:  rank 0 SharedMemory(create=True) → barrier → 其他 rank 按名字 attach
+exit:         所有 rank close                  → barrier → rank 0 unlink（删掉 /dev/shm 里的文件）
+```
+
+**为什么 grep 不到 `ModelRunner.exit` 的调用**：`call` 和 `loop` 都用 `getattr(self, method)` 按名字分发（nano-vllm 也一样），调用方写的是字符串 `"exit"` / `"run"`。
 
 **要注意的坑**：
 
 | 坑 | 原因和处理 |
 | --- | --- |
 | **子进程里 `Sequence.block_size` 又变回 256** | spawn 会重新 import 模块，类属性不继承。worker 初始化时要从 config 里重新设置。测试用 block_size=4 时，如果忘了这一步，rank 1 算的 slot 会全部错位 |
-| rank 1 报错后 rank 0 卡住 | rank 0 会一直等 all_reduce。worker 里捕获异常、写到一个 Queue，rank 0 的 `call` 里检查；或者 `init_process_group(timeout=...)` 设一个超时 |
+| rank 1 报错后 rank 0 卡住 | rank 0 会一直等 all_reduce（NCCL 默认要等 10 分钟）。**已处理**：`init_process_group(timeout=60s)`（`process_group.TIMEOUT`）。实测：往 worker 的 `run` 里注入一个异常，worker 打印 traceback 后退出；rank 0 在 all_reduce 里等了 60 s，NCCL watchdog 判定超时，再等 15 s 做健康检查后 abort（退出码 134），`/dev/shm` 由 resource tracker 清理。没有用 Queue 传异常，简单一些 |
+| worker 在 `event.wait()` 里被杀掉（SIGKILL / OOM killer），rank 0 永远卡住 | **未处理，已知限制**。`mp.Event.set()` 底层的 `Condition.notify` 会等每个正在 wait 的进程确认自己醒了，死掉的进程永远不会确认，于是 rank 0 卡在 `write_shm` 的 `event.set()` 里，根本走不到 all_reduce，NCCL 超时管不到。nano-vllm 也有同样的问题。真要处理的话，可以在 `call` 之前检查 `process.is_alive()`（仍有竞态），或者换掉 Event 的实现 |
 | 第二次启动报 `FileExistsError` | 上次异常退出时共享内存没有 unlink。名字里带上 rank 0 的 pid |
 | 端口冲突 | 不要像 nano-vllm 那样写死 2333，用第 0 步的 `free_port()` |
 | pickle 的开销 | decode 时每步都传全部 seqs 的 `token_ids`。nano-vllm 在 `Sequence.__getstate__` 里只传 decode 需要的字段。先不做，第 8 步如果在 profile 里看到再优化 |
 
 **验证**：起一个 TP=2 的 engine，调用一个什么都不做的方法，再 `exit()`，确认子进程已经退出、`/dev/shm` 里没有残留。
+
+**实测（5090 + 4060，Qwen3-0.6B，`use_flash=False`，greedy，prompt 为 "The capital of France is"）**：engine 启动 4.1 s；两卡取最小后 KV block 数为 394（TP=1 只用 5090 时是 916）；`exit()` 后子进程 exitcode 为 0，`/dev/shm` 里没有残留，连续调用两次 `exit()` 也没问题。生成结果如下：
+
+| dtype | TP=1 | TP=2 |
+| --- | --- | --- |
+| bf16（16 token） | Paris. The capital of **Italy is Rome**. The capital of Spain is Madrid. | Paris. The capital of **France is also** the capital of the Republic of France. |
+| float32（32 token） | Paris. The capital of Italy is Rome. … The capital of Japan is Tokyo. The capital | **逐字相同** |
+
+**bf16 下出现分叉不是 bug。** TP=2 时，每层 `o_proj` 和 `down_proj` 的输出由两张卡各算一半再 all_reduce 相加；TP=1 是在一个 matmul 里一次加完。浮点加法不满足结合律，加法顺序变了，结果就会差最后几位。bf16 只有 8 位尾数，这点误差在 28 层里不断累积，到 logits 上已经足够让两个分数接近的候选 token 换位（这里是 "Italy" 和 "France"）。greedy 一旦在某一步选了不同的 token，后面的上下文就不同了，整段输出都会走向另一条路径。float32 下误差小了几个数量级，翻不动 argmax，所以输出逐字相同。
+
+所以 bf16 下 TP=2 不能要求逐 token 和 TP=1 相同。要验证正确性，可以用 float32 比较输出，或者按第 7 步的做法 teacher forcing 并给 logits 设容差。
 
 ## 第 6 步：接线
 

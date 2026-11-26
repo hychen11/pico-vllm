@@ -9,18 +9,35 @@ CUDA Graph (M6 step 6): ``capture_cudagraphs`` records one decode step per batch
 size in ``graph_batch_sizes``. A decode step that fits then copies its inputs into
 fixed buffers and replays the smallest graph that holds it, instead of launching
 every kernel from Python. See docs/concepts/decode-attention-and-cuda-graph.md.
+
+Tensor parallelism (M8 step 5), as in nano-vllm: ``from_config(config, rank, ...)``
+builds one rank's runner. Ranks > 0 run it in their own process and never return
+from it: they stay in ``loop()``, running every ``call`` rank 0 broadcasts through
+shared memory, until ``"exit"``.
 """
 
 from __future__ import annotations
 
 import math
+import pickle
+from multiprocessing.shared_memory import SharedMemory
+from typing import TYPE_CHECKING, Any
 
 import torch
+import torch.distributed as dist
 
 from pico_vllm.core.paged_kv_cache import PagedKVCache
 from pico_vllm.models.qwen3 import Qwen3ForCausalLM
 from pico_vllm.sequence import Sequence
 from pico_vllm.utils.context import Context, reset_context, set_context
+from pico_vllm.worker.process_group import init_process_group
+
+if TYPE_CHECKING:
+    from pico_vllm.config import Config
+
+# Room for one pickled ``(method, args)`` call; a decode step's args carry every
+# scheduled seq's token ids. /dev/shm pages are only allocated when written.
+SHM_BYTES = 2**24
 
 
 def slot_mapping_for(block_table: list[int], block_size: int, start: int, end: int) -> list[int]:
@@ -45,6 +62,130 @@ class ModelRunner:
         self.graphs: dict[int, torch.cuda.CUDAGraph] = {}  # batch size -> graph
         self.graph_batch_sizes: list[int] = []  # ascending
         self.graph_vars: dict[str, torch.Tensor] = {}  # fixed buffers the graphs read
+        # TP (set by from_config): rank, broadcast channel, and whether exit()
+        # destroys the process group.
+        self.rank = dist.get_rank()
+        self.world_size = dist.get_world_size()
+        self.shm: SharedMemory | None = None
+        self.events: list[Any] = []  # rank 0: one per worker
+        self.event: Any = None  # ranks > 0: their own
+        self.owns_group = False
+
+    @classmethod
+    def from_config(
+            cls, config: Config, rank: int = 0, event: Any = None, port: int | None = None,
+    ) -> ModelRunner:
+        """Build rank ``rank``'s runner for the checkpoint ``config.model``.
+
+        Rank 0 (in the engine's process): ``event`` is the list of the workers'
+        Events; returns the runner. Rank > 0 (the target of a spawned process):
+        ``event`` is its own Event; never returns until rank 0 calls ``"exit"``.
+        ``port``: where all ranks meet (TP>1); ``None`` picks one (TP=1).
+
+        Every rank runs the same collectives in the same order: KV sizing runs the
+        model forward (an all_reduce per layer), then the ranks agree on num_blocks.
+        """
+        # Lazy: llm_engine imports this module.
+        from pico_vllm.engine.llm_engine import build_model, num_kv_blocks
+
+        tp = config.tensor_parallel_size
+        if rank > 0:
+            config.device = torch.device("cuda", rank)  # this process's pickled copy
+            torch.cuda.set_device(config.device)
+            # spawn re-imports every module: class attributes are back to defaults.
+            Sequence.block_size = config.kvcache_block_size
+        owns_group = init_process_group(tp, config.device, port=port, rank=rank)
+
+        model = build_model(config)
+        num_blocks = num_kv_blocks(config, model)
+        if tp > 1:
+            # One block table for all ranks: none may use more blocks than the
+            # smallest cache holds (the 4060's, here).
+            t = torch.tensor([num_blocks], device=config.device)
+            dist.all_reduce(t, op=dist.ReduceOp.MIN)
+            num_blocks = int(t.item())
+        hf = config.hf_config
+        kv_cache = PagedKVCache(  # this rank's KV heads only
+            hf.num_hidden_layers, num_blocks, config.kvcache_block_size,
+            hf.num_key_value_heads // tp, hf.head_dim,
+            dtype=config.dtype, device=config.device,
+        )
+        # Config.__post_init__ already resolved use_flash to a bool.
+        self = cls(model, kv_cache, config.kvcache_block_size,
+                   use_flash=bool(config.use_flash))
+        self.owns_group = owns_group
+        # After the KV cache (as nano-vllm): graphs record its addresses, and their
+        # memory pool comes out of the headroom gpu_memory_utilization leaves.
+        # (TP>1 forces enforce_eager.)
+        if config.use_flash and kv_cache.use_triton and not config.enforce_eager:
+            self.capture_cudagraphs(config.max_num_seqs, config.max_model_len)
+
+        if tp > 1:
+            name = f"pico_vllm_{port}"  # the port is unique to this engine
+            if rank == 0:
+                self.shm = SharedMemory(name=name, create=True, size=SHM_BYTES)
+                self.events = event
+                dist.barrier()  # the workers may attach now
+            else:
+                dist.barrier()
+                # track=False: rank 0 created it and unlinks it.
+                self.shm = SharedMemory(name=name, track=False)
+                self.event = event
+                self.loop()
+        return self
+
+    def write_shm(self, method: str, *args: Any) -> None:
+        """Rank 0: 4-byte length + ``pickle.dumps((method, args))``, then wake all."""
+        data = pickle.dumps((method, args))
+        if 4 + len(data) > self.shm.size:
+            raise RuntimeError(f"call {method!r} pickles to {len(data)} bytes; "
+                               f"the shared memory holds {self.shm.size - 4}")
+        self.shm.buf[:4] = len(data).to_bytes(4, "little")
+        self.shm.buf[4:4 + len(data)] = data
+        for event in self.events:
+            event.set()
+
+    def read_shm(self) -> tuple[str, tuple]:
+        """Ranks > 0: wait for rank 0's next call and return it."""
+        self.event.wait()
+        n = int.from_bytes(self.shm.buf[:4], "little")
+        method, args = pickle.loads(self.shm.buf[4:4 + n])
+        self.event.clear()
+        return method, args
+
+    def loop(self) -> None:
+        """Ranks > 0: run rank 0's calls until ``"exit"``."""
+        while True:
+            method, args = self.read_shm()
+            self.call(method, *args)
+            if method == "exit":
+                break
+
+    def call(self, method: str, *args: Any) -> Any:
+        """``self.<method>(*args)`` on every rank; rank 0 broadcasts it first.
+
+        Rank 0 may only overwrite the buffer once every worker has read it. ``run``
+        guarantees that (its all_reduces wait for every rank), and so does
+        ``exit`` (a barrier), the only calls the engine makes.
+        """
+        if self.rank == 0 and self.shm is not None:  # TP>1, workers not exited yet
+            self.write_shm(method, *args)
+        return getattr(self, method)(*args)
+
+    def exit(self) -> None:
+        """Release the shared memory and, if this runner created it, the group.
+        Every rank runs it (via ``call("exit")``), so the collectives here match."""
+        if self.shm is not None:
+            self.shm.close()
+            dist.barrier()  # every rank has closed it before rank 0 unlinks
+            if self.rank == 0:
+                self.shm.unlink()
+            self.shm = None
+        if self.owns_group and dist.is_initialized():
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            dist.destroy_process_group()
+            self.owns_group = False
 
     def prepare_inputs(
             self, seqs: list[Sequence], is_prefill: bool

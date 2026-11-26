@@ -11,13 +11,16 @@ plus stopping rules.
 
 from __future__ import annotations
 
+import atexit
 import gc
+import weakref
 from typing import Any
 
 import torch
+import torch.multiprocessing as mp
 
 from pico_vllm.config import DEFAULT_CPU_KVCACHE_BYTES, Config
-from pico_vllm.core.paged_kv_cache import PagedKVCache, kv_block_bytes
+from pico_vllm.core.paged_kv_cache import kv_block_bytes
 from pico_vllm.core.scheduler import Scheduler
 from pico_vllm.models.qwen3 import Qwen3ForCausalLM
 from pico_vllm.sampler import sample
@@ -26,7 +29,7 @@ from pico_vllm.sequence import Sequence
 from pico_vllm.utils.loader import init_on, load_model
 from pico_vllm.worker.memory import num_blocks_from_gpu_memory, profile_activation_bytes
 from pico_vllm.worker.model_runner import ModelRunner
-from pico_vllm.worker.process_group import init_process_group
+from pico_vllm.worker.process_group import free_port
 
 
 def build_model(config: Config) -> Qwen3ForCausalLM:
@@ -65,8 +68,8 @@ def num_kv_blocks(config: Config, model: Qwen3ForCausalLM) -> int:
         free, total = torch.cuda.mem_get_info(config.device)
         source = (
             f"gpu_memory_utilization={config.gpu_memory_utilization} "
-            f"({(total - free) / 2**30:.2f} of {total / 2**30:.2f} GiB already in use, "
-            f"{activation / 2**30:.2f} GiB reserved for activations)"
+            f"({(total - free) / 2 ** 30:.2f} of {total / 2 ** 30:.2f} GiB already in use, "
+            f"{activation / 2 ** 30:.2f} GiB reserved for activations)"
         )
     else:
         capacity = DEFAULT_CPU_KVCACHE_BYTES if capacity is None else capacity
@@ -80,6 +83,13 @@ def num_kv_blocks(config: Config, model: Qwen3ForCausalLM) -> int:
     return num_blocks
 
 
+def _exit_engine(ref: weakref.ref[LLMEngine]) -> None:
+    """atexit hook: ``exit`` the engine if it is still alive (calling it twice is fine)."""
+    engine = ref()
+    if engine is not None:
+        engine.exit()
+
+
 class LLMEngine:
     def __init__(
             self,
@@ -88,7 +98,7 @@ class LLMEngine:
             eos_token_id: int | None,
             tokenizer: Any | None = None,
             max_model_len: int | None = None,
-            owns_group: bool = False,
+            processes: list[Any] | None = None,
     ) -> None:
         """Wire already-built components together.
 
@@ -100,22 +110,27 @@ class LLMEngine:
         ``max_tokens`` exceeds it (``None``: no limit). CUDA Graph buffers are sized
         for it, so no sequence may grow past it.
 
-        ``owns_group``: this engine created the torch.distributed process group
-        (``from_config``), so it is the one to destroy it on exit (M8 step 5).
+        ``processes`` (TP>1, from ``from_config``): the worker processes of ranks
+        1.. . ``exit`` stops them; it also runs at interpreter exit (any TP size)
+        if the engine is still alive then.
         """
         self.scheduler = scheduler
         self.model_runner = model_runner
         self.eos_token_id = eos_token_id
         self.tokenizer = tokenizer
         self.max_model_len = max_model_len
-        self.owns_group = owns_group
+        self.processes = processes or []
+        # Always (as nano-vllm), so the process group this engine created is
+        # destroyed even with TP=1. Through a weak reference: a bound method would
+        # keep every engine (and its KV cache) alive until the interpreter exits.
+        atexit.register(_exit_engine, weakref.ref(self))
 
     @classmethod
     def from_config(cls, config: Config) -> LLMEngine:
         """Build every component for the local checkpoint ``config.model``.
 
-        - ``build_model(config)``: weights on ``config.device`` in ``config.dtype``;
-        - ``PagedKVCache`` on the same device/dtype, sized by ``num_kv_blocks``;
+        - TP>1: spawn ranks 1.. first (``ModelRunner.from_config`` in each);
+        - ``ModelRunner.from_config``: this rank's model and KV cache;
         - ``Scheduler`` and ``PagedKVCache`` must share ``num_blocks`` and block size;
         - set ``Sequence.block_size = config.kvcache_block_size`` (class attribute!);
         - ``AutoTokenizer.from_pretrained(config.model)``; EOS id from the tokenizer.
@@ -127,40 +142,41 @@ class LLMEngine:
             # returned, and the auto-sized cache shrinks with every new engine.
             gc.collect()
             torch.cuda.empty_cache()
+        processes, events, port = [], [], None
         if config.tensor_parallel_size > 1:
-            # A world_size > 1 group would wait forever for ranks nobody started.
-            raise NotImplementedError("tensor_parallel_size > 1 needs the worker "
-                                      "processes of M8 step 5")
-        owns_group = init_process_group(config.tensor_parallel_size, config.device)
-        model = build_model(config)
+            port = free_port()
+            ctx = mp.get_context("spawn")
+            for rank in range(1, config.tensor_parallel_size):
+                event = ctx.Event()
+                # daemon: killed if rank 0 dies before exit() (e.g. raises below)
+                process = ctx.Process(target=ModelRunner.from_config, daemon=True,
+                                      args=(config, rank, event, port))
+                process.start()
+                processes.append(process)
+                events.append(event)
+        runner = ModelRunner.from_config(config, 0, events, port)
 
-        hf = config.hf_config
-        dtype = config.dtype
         block_size = config.kvcache_block_size
-        num_blocks = num_kv_blocks(config, model)
-
-        kv_cache = PagedKVCache(  # this rank's KV heads only
-            hf.num_hidden_layers, num_blocks, block_size,
-            hf.num_key_value_heads // config.tensor_parallel_size, hf.head_dim,
-            dtype=dtype, device=config.device,
-        )
+        num_blocks = runner.kv_cache.k_cache.shape[1]
         Sequence.block_size = block_size
         scheduler = Scheduler(
             config.max_num_seqs, config.max_num_batched_tokens, num_blocks, block_size
         )
-        # Config.__post_init__ already resolved use_flash to a bool.
-        runner = ModelRunner(model, kv_cache, block_size, use_flash=bool(config.use_flash))
-        # After the KV cache (as nano-vllm): graphs record its addresses, and their
-        # memory pool comes out of the headroom gpu_memory_utilization leaves.
-        if config.use_flash and kv_cache.use_triton and not config.enforce_eager:
-            runner.capture_cudagraphs(config.max_num_seqs, config.max_model_len)
         # Imported lazily: transformers is an optional dependency (``--extra model``).
         from transformers import AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(config.model)
         eos_token_id = tokenizer.eos_token_id
         return cls(scheduler, runner, eos_token_id, tokenizer, config.max_model_len,
-                   owns_group=owns_group)
+                   processes=processes)
+
+    def exit(self) -> None:
+        """Stop the TP workers and release the shared memory and the process group
+        (if this engine created it). Safe to call twice; runs at interpreter exit."""
+        self.model_runner.call("exit")
+        for process in self.processes:
+            process.join()
+        self.processes = []
 
     def add_request(
             self, prompt: str | list[int], sampling_params: SamplingParams
@@ -213,7 +229,7 @@ class LLMEngine:
         if self.scheduler.is_finished():
             return []
         seqs, is_prefill = self.scheduler.schedule()
-        logits = self.model_runner.run(seqs, is_prefill)
+        logits = self.model_runner.call("run", seqs, is_prefill)
         temperatures = torch.tensor(
             [seq.sampling_params.temperature for seq in seqs], device=logits.device
         )
