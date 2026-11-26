@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 
 import pytest
 import torch
@@ -58,3 +60,21 @@ def test_benchmark_real_weights() -> None:
     result = run_benchmark(num_seqs=4, min_input_len=16, max_input_len=64, output_len=8,
                            device="cuda", model_path=path)
     assert result.output_tokens == 4 * 8
+
+
+@pytest.mark.cuda
+@pytest.mark.model
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires 2 GPUs")
+def test_benchmark_tp2() -> None:
+    """``--tp 2`` (M8) runs end to end. A subprocess: this one already holds the
+    test session's world_size=1 group."""
+    path = os.environ.get("PICO_VLLM_QWEN_MODEL")
+    if not path:
+        pytest.skip("set PICO_VLLM_QWEN_MODEL to a local Qwen3 dir")
+    out = subprocess.run(
+        [sys.executable, "-m", "pico_vllm.benchmark", "--model", path, "--tp", "2",
+         "--no-flash", "--num-seqs", "4", "--min-input-len", "16", "--max-input-len", "64",
+         "--max-output-len", "8", "--kv-cache-gib", "0.5"],
+        capture_output=True, text=True, timeout=300, check=True,
+    ).stdout
+    assert "tp=2" in out and "decode:" in out

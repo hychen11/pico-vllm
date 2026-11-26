@@ -15,6 +15,10 @@ hits from pass 1):
 
     uv run python -m pico_vllm.benchmark --model ~/models/Qwen3-0.6B
     uv run python -m pico_vllm.benchmark --num-seqs 64 --max-output-len 256
+    uv run python -m pico_vllm.benchmark --model ~/models/Qwen3-0.6B --no-flash --tp 2
+
+TP>1 (M8), as nano-vllm: one ``LLMEngine.from_config`` (it spawns the workers);
+each pass only gets a fresh scheduler, which is enough to drop the prefix cache.
 """
 
 from __future__ import annotations
@@ -29,7 +33,7 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
-from pico_vllm.config import DTYPES, resolve_use_flash
+from pico_vllm.config import DTYPES, Config, resolve_use_flash
 from pico_vllm.core.paged_kv_cache import PagedKVCache, num_blocks_from_capacity
 from pico_vllm.core.scheduler import Scheduler
 from pico_vllm.engine.llm_engine import LLMEngine
@@ -69,6 +73,11 @@ class BenchmarkResult:
     output_tokens: int
     prefill_seconds: float
     total_seconds: float
+    # What the run actually used (read off the runner), not what was asked for:
+    # e.g. no FlashAttention -> no CUDA Graph, and TP>1 forces eager.
+    triton_kv_store: bool = False
+    flash: bool = False
+    cuda_graph: bool = False
 
     @property
     def prefill_tok_s(self) -> float:
@@ -173,9 +182,14 @@ def run_benchmark(
         use_triton: bool | None = None,
         use_flash: bool | None = None,
         use_cuda_graph: bool = True,
+        tensor_parallel_size: int = 1,
 ) -> BenchmarkResult:
     """``model_path``: load that checkpoint (and its config); otherwise random weights
-    with ``hf_config`` (default: Qwen3-0.6B shapes)."""
+    with ``hf_config`` (default: Qwen3-0.6B shapes). ``tensor_parallel_size`` > 1
+    needs ``model_path``; ``use_triton`` / ``use_cuda_graph`` then do not apply."""
+    tp = tensor_parallel_size
+    if tp > 1 and model_path is None:
+        raise ValueError("tensor_parallel_size > 1 needs model_path")
     if model_path is not None:
         from transformers import AutoConfig
 
@@ -184,14 +198,27 @@ def run_benchmark(
         hf_config = qwen3_0_6b_config()
     torch.manual_seed(seed)
     dev = torch.device(device)
-    init_process_group(1, dev)  # the layers read the TP rank/size from it
-    with init_on(dev, dtype):
-        model = Qwen3ForCausalLM(hf_config)
-    if model_path is not None:
-        load_model(model, model_path)
-    model.eval()
+    if tp > 1:  # as nano-vllm: the model lives in the workers, so one engine
+        engine = LLMEngine.from_config(Config(
+            model_path, tensor_parallel_size=tp, device=dev, dtype=dtype,
+            use_flash=use_flash, kvcache_capacity_bytes=kvcache_capacity_bytes,
+            kvcache_block_size=block_size, max_num_seqs=max_num_seqs,
+            max_num_batched_tokens=max_num_batched_tokens,
+        ))
+    else:
+        init_process_group(1, dev)  # the layers read the TP rank/size from it
+        with init_on(dev, dtype):
+            model = Qwen3ForCausalLM(hf_config)
+        if model_path is not None:
+            load_model(model, model_path)
+        model.eval()
 
     def fresh_engine() -> LLMEngine:
+        if tp > 1:  # a fresh scheduler drops the prefix cache of the last pass
+            num_blocks = engine.model_runner.kv_cache.k_cache.shape[1]
+            engine.scheduler = Scheduler(max_num_seqs, max_num_batched_tokens,
+                                         num_blocks, block_size)
+            return engine
         return build_engine(
             model, hf_config, kvcache_capacity_bytes=kvcache_capacity_bytes,
             block_size=block_size, max_num_seqs=max_num_seqs,
@@ -202,24 +229,28 @@ def run_benchmark(
     prompts = make_prompts(num_seqs, min_input_len, max_input_len, hf_config.vocab_size, seed)
     prompt_tokens = sum(len(p) for p in prompts)
 
-    if warmup:
-        warm = make_prompts(2, 16, 64, hf_config.vocab_size, seed + 1)
-        generate(fresh_engine(), warm,
-                 SamplingParams(temperature=0.0, max_tokens=4, ignore_eos=True))
-
-    def timed(max_tokens: int) -> tuple[float, int]:
+    def timed(max_tokens: int) -> tuple[float, int, ModelRunner]:
         engine = fresh_engine()
         sp = SamplingParams(temperature=0.0, max_tokens=max_tokens, ignore_eos=True)
         _synchronize(dev)
         start = time.perf_counter()
         output_tokens = generate(engine, prompts, sp)
         _synchronize(dev)
-        return time.perf_counter() - start, output_tokens
+        return time.perf_counter() - start, output_tokens, engine.model_runner
 
-    prefill_seconds, _ = timed(1)
-    total_seconds, output_tokens = timed(output_len)
+    try:
+        if warmup:
+            warm = make_prompts(2, 16, 64, hf_config.vocab_size, seed + 1)
+            generate(fresh_engine(), warm,
+                     SamplingParams(temperature=0.0, max_tokens=4, ignore_eos=True))
+        prefill_seconds, _, _ = timed(1)
+        total_seconds, output_tokens, runner = timed(output_len)
+    finally:
+        if tp > 1:
+            engine.exit()
     return BenchmarkResult(num_seqs, prompt_tokens, output_tokens, prefill_seconds,
-                           total_seconds)
+                           total_seconds, triton_kv_store=runner.kv_cache.use_triton,
+                           flash=runner.use_flash, cuda_graph=bool(runner.graphs))
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -242,6 +273,9 @@ def main(argv: list[str] | None = None) -> None:
                         help="force the eager attention (A/B against FlashAttention 2)")
     parser.add_argument("--no-cuda-graph", action="store_true",
                         help="launch decode kernels one by one (A/B against CUDA Graph)")
+    parser.add_argument("--tp", type=int, default=1,
+                        help="tensor_parallel_size (needs --model; rank i uses cuda:i, "
+                             "pass --no-flash unless every GPU runs FlashAttention 2)")
     args = parser.parse_args(argv)
 
     result = run_benchmark(
@@ -258,12 +292,13 @@ def main(argv: list[str] | None = None) -> None:
         use_triton=False if args.no_triton else None,
         use_flash=False if args.no_flash else None,
         use_cuda_graph=not args.no_cuda_graph,
+        tensor_parallel_size=args.tp,
     )
     name = torch.cuda.get_device_name(args.device) if args.device.startswith("cuda") else "cpu"
     weights = args.model or "random (Qwen3-0.6B shapes)"
-    print(f"device={name} dtype={args.dtype} triton_kv_store={not args.no_triton} "
-          f"flash={not args.no_flash} cuda_graph={not args.no_cuda_graph} "
-          f"weights={weights}")
+    print(f"device={name} dtype={args.dtype} triton_kv_store={result.triton_kv_store} "
+          f"flash={result.flash} cuda_graph={result.cuda_graph} "
+          f"tp={args.tp} weights={weights}")
     print(result)
 
 
